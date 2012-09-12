@@ -1,0 +1,23 @@
+Source: python-swiftclient
+Section: python
+Priority: extra
+Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
+Uploaders: Mehdi Abaakouk <sileht@sileht.net>
+Build-Depends: debhelper (>= 8.0.0),
+ python-httplib2,
+ python-argparse,
+ python-setuptools, 
+ python-all (>= 2.6.6-3~),
+ python-nose, python-prettytable,
+ python-simplejson,
+ python-eventlet
+Standards-Version: 3.9.2
+
+Package: python-swiftclient
+Architecture: all
+Depends: ${python:Depends}, ${misc:Depends},
+ python-eventlet,
+ python-httplib2
+Description: Client libary for Openstack Swift API.
+ This is a client for the OpenStack Swift API. There's a Python API 
+ (the ``swiftclient`` module), and a command-line script (``swift``).

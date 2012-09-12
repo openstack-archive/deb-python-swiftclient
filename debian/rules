@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+%:
+	dh $@  --with python2
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	set -e ; for pyversion in $(shell pyversions -r); do $$pyversion setup.py test; done
+endif
+
+get-orig-source:
+	uscan --verbose --force-download --rename --destdir=../build-area

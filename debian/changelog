@@ -1,0 +1,21 @@
+python-swiftclient (1:1.1.1-1) unstable; urgency=low
+
+  * Initial debian release (Closes #687415)
+
+ -- Mehdi Abaakouk <sileht@sileht.net>  Wed, 12 Sep 2012 15:51:39 +0200
+
+python-swiftclient (1:1.1.1-0ubuntu1) quantal; urgency=low
+
+  [ Adam Gandelman ]
+  * Initial release.
+
+  [ Chuck Short ]
+  * debian/watch: Added
+  * debian/rules: Download tarball from regular places.
+  * Update changelog
+  * debian/control: Add python-eventlet as a build depends.
+  * debian/rules: Enabled changelog.
+  * debian/copyright: Update format.
+
+ -- Adam Gandelman <adamg@canonical.com>  Wed, 06 Jun 2012 12:54:56 -0700
+
