@@ -8,7 +8,7 @@ Build-Depends: debhelper (>= 8.0.0),
  python-argparse,
  python-setuptools, 
  python-all (>= 2.6.6-3~),
- python-nose, python-prettytable,
+ python-nose,
  python-simplejson,
  python-eventlet
 Standards-Version: 3.9.3
