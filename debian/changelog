@@ -1,6 +1,6 @@
 python-swiftclient (1:1.1.1-1) experimental; urgency=low
 
-  * Initial debian release (Closes #687415)
+  * Initial debian release (Closes: #687415)
 
  -- Mehdi Abaakouk <sileht@sileht.net>  Wed, 12 Sep 2012 15:51:39 +0200
 
