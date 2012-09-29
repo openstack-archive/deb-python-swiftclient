@@ -1,3 +1,9 @@
+python-swiftclient (1:1.2.0-1) experimental; urgency=low
+
+  * New upstream version 
+
+ -- Mehdi Abaakouk <sileht@sileht.net>  Sat, 29 Sep 2012 09:13:34 +0200
+
 python-swiftclient (1:1.1.1-1) experimental; urgency=low
 
   * Initial debian release (Closes: #687415)
