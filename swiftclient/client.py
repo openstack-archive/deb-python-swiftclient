@@ -237,11 +237,17 @@ def get_keystoneclient_2_0(auth_url, user, key, os_options):
     """
     from keystoneclient.v2_0 import client as ksclient
     from keystoneclient import exceptions
-    _ksclient = ksclient.Client(username=user,
-                                password=key,
-                                tenant_name=os_options.get('tenant_name'),
-                                tenant_id=os_options.get('tenant_id'),
-                                auth_url=auth_url)
+    try:
+        _ksclient = ksclient.Client(username=user,
+                                    password=key,
+                                    tenant_name=os_options.get('tenant_name'),
+                                    tenant_id=os_options.get('tenant_id'),
+                                    auth_url=auth_url)
+    except exceptions.Unauthorized:
+        raise ClientException('Unauthorised. Check username, password'
+                              ' and tenant name/id')
+    except exceptions.AuthorizationFailure, err:
+        raise ClientException('Authorization Failure. %s' % err)
     service_type = os_options.get('service_type') or 'object-store'
     endpoint_type = os_options.get('endpoint_type') or 'publicURL'
     try:
@@ -267,6 +273,7 @@ def get_auth(auth_url, user, key, **kwargs):
     client to be running on Rackspace's ServiceNet network.
     """
     auth_version = kwargs.get('auth_version', '1')
+    os_options = kwargs.get('os_options', {})
 
     if auth_version in ['1.0', '1', 1]:
         return get_auth_1_0(auth_url,
@@ -278,28 +285,28 @@ def get_auth(auth_url, user, key, **kwargs):
 
         # We are allowing to specify a token/storage-url to re-use
         # without having to re-authenticate.
-        if (kwargs['os_options'].get('object_storage_url') and
-                kwargs['os_options'].get('auth_token')):
-            return(kwargs['os_options'].get('object_storage_url'),
-                   kwargs['os_options'].get('auth_token'))
+        if (os_options.get('object_storage_url') and
+                os_options.get('auth_token')):
+            return(os_options.get('object_storage_url'),
+                   os_options.get('auth_token'))
 
         # We are handling a special use case here when we were
         # allowing specifying the account/tenant_name with the -U
         # argument
         if not kwargs.get('tenant_name') and ':' in user:
-            (kwargs['os_options']['tenant_name'],
+            (os_options['tenant_name'],
              user) = user.split(':')
 
         # We are allowing to have an tenant_name argument in get_auth
         # directly without having os_options
         if kwargs.get('tenant_name'):
-            kwargs['os_options']['tenant_name'] = kwargs['tenant_name']
+            os_options['tenant_name'] = kwargs['tenant_name']
 
-        if (not 'tenant_name' in kwargs['os_options']):
+        if (not 'tenant_name' in os_options):
             raise ClientException('No tenant specified')
 
         (auth_url, token) = get_keystoneclient_2_0(auth_url, user,
-                                                   key, kwargs['os_options'])
+                                                   key, os_options)
         return (auth_url, token)
 
     raise ClientException('Unknown auth_version %s specified.'
@@ -916,7 +923,7 @@ class Connection(object):
 
     def __init__(self, authurl, user, key, retries=5, preauthurl=None,
                  preauthtoken=None, snet=False, starting_backoff=1,
-                 tenant_name=None, os_options={}, auth_version="1"):
+                 tenant_name=None, os_options=None, auth_version="1"):
         """
         :param authurl: authentication URL
         :param user: user name to authenticate as
@@ -944,9 +951,9 @@ class Connection(object):
         self.snet = snet
         self.starting_backoff = starting_backoff
         self.auth_version = auth_version
+        self.os_options = os_options or {}
         if tenant_name:
-            os_options['tenant_name'] = tenant_name
-        self.os_options = os_options
+            self.os_options['tenant_name'] = tenant_name
 
     def get_auth(self):
         return get_auth(self.authurl,
