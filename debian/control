@@ -22,6 +22,7 @@ Vcs-Browser: http://git.debian.org/?p=openstack/python-swiftclient.git;a=summary
 
 Package: python-swiftclient
 Architecture: all
+Pre-Depends: dpkg (>= 1.15.6~)
 Depends: ${python:Depends}, ${misc:Depends},
  python-eventlet,
  python-httplib2,
