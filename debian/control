@@ -2,7 +2,10 @@ Source: python-swiftclient
 Section: python
 Priority: extra
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-Uploaders: Mehdi Abaakouk <sileht@sileht.net>
+Uploaders: Julien Danjou <acid@debian.org>,
+           Thomas Goirand <zigo@debian.org>,
+           Ghe Rivero <ghe.rivero@stackops.com>,
+           Mehdi Abaakouk <sileht@sileht.net>
 Build-Depends: debhelper (>= 8.0.0),
  python-httplib2,
  python-argparse,
