@@ -6,14 +6,15 @@ Uploaders: Julien Danjou <acid@debian.org>,
            Thomas Goirand <zigo@debian.org>,
            Ghe Rivero <ghe.rivero@stackops.com>,
            Mehdi Abaakouk <sileht@sileht.net>
-Build-Depends: debhelper (>= 8.0.0),
+Build-Depends: debhelper (>= 9),
+ python-all (>= 2.6.6-3~)
+Build-Depends-Indep: openstack-pkg-tools,
+ python-argparse,  
+ python-eventlet,
  python-httplib2,
- python-argparse,
- python-setuptools, 
- python-all (>= 2.6.6-3~),
  python-nose,
- python-simplejson,
- python-eventlet
+ python-setuptools,
+ python-simplejson
 Standards-Version: 3.9.3
 Homepage: https://github.com/openstack/python-swiftclient
 Vcs-Git: git://git.debian.org/openstack/python-swiftclient.git
