@@ -3,7 +3,7 @@ python-swiftclient (1:1.2.0+git1.2be776c2-1) experimental; urgency=low
   * New snapshot release 
   * Add depend on python-keystoneclient
 
- -- Mehdi Abaakouk <sileht@sileht.net>  Mon, 29 Oct 2012 14:18:04 +0100
+ -- Thomas Goirand <zigo@debian.org>  Mon, 17 Dec 2012 14:39:57 +0000
 
 python-swiftclient (1:1.2.0-1) experimental; urgency=low
 
