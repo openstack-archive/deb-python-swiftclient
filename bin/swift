@@ -15,6 +15,7 @@
 # limitations under the License.
 import signal
 import socket
+import logging
 
 from errno import EEXIST, ENOENT
 from hashlib import md5
@@ -29,7 +30,7 @@ from time import sleep, time
 from traceback import format_exception
 from urllib import quote, unquote
 
-from swiftclient import Connection, ClientException, HTTPException
+from swiftclient import Connection, ClientException, HTTPException, utils
 
 
 def get_conn(options):
@@ -41,7 +42,9 @@ def get_conn(options):
                       options.key,
                       auth_version=options.auth_version,
                       os_options=options.os_options,
-                      snet=options.snet)
+                      snet=options.snet,
+                      cacert=options.os_cacert,
+                      insecure=options.insecure)
 
 
 def mkdirs(path):
@@ -807,7 +810,7 @@ def st_upload(parser, args, print_queue, error_queue):
                 obj = obj[2:]
             if obj.startswith('/'):
                 obj = obj[1:]
-            put_headers = {'x-object-meta-mtime': str(getmtime(path))}
+            put_headers = {'x-object-meta-mtime': "%f" % getmtime(path)}
             if dir_marker:
                 if options.changed:
                     try:
@@ -845,8 +848,9 @@ def st_upload(parser, args, print_queue, error_queue):
                     except ClientException, err:
                         if err.http_status != 404:
                             raise
+                # Don't do segment job if object is not big enough
                 if options.segment_size and \
-                        getsize(path) < options.segment_size:
+                        getsize(path) > int(options.segment_size):
                     full_size = getsize(path)
                     segment_queue = Queue(10000)
                     segment_threads = [QueueFunctionThread(segment_queue,
@@ -861,9 +865,9 @@ def st_upload(parser, args, print_queue, error_queue):
                         if segment_start + segment_size > full_size:
                             segment_size = full_size - segment_start
                         segment_queue.put({'path': path,
-                            'obj': '%s/%s/%s/%08d' % (obj,
+                            'obj': '%s/%s/%s/%s/%08d' % (obj,
                                 put_headers['x-object-meta-mtime'], full_size,
-                                segment),
+                                options.segment_size, segment),
                             'segment_start': segment_start,
                             'segment_size': segment_size,
                             'log_line': '%s segment %s' % (obj, segment)})
@@ -879,9 +883,10 @@ def st_upload(parser, args, print_queue, error_queue):
                         raise ClientException('Aborting manifest creation '
                             'because not all segments could be uploaded. %s/%s'
                             % (container, obj))
-                    new_object_manifest = '%s_segments/%s/%s/%s/' % (
+                    new_object_manifest = '%s_segments/%s/%s/%s/%s' % (
                         quote(container), quote(obj),
-                        put_headers['x-object-meta-mtime'], full_size)
+                        put_headers['x-object-meta-mtime'], full_size,
+                            options.segment_size)
                     if old_manifest == new_object_manifest:
                         old_manifest = None
                     put_headers['x-object-manifest'] = new_object_manifest
@@ -1030,10 +1035,6 @@ def parse_args(parser, args, enforce_requires=True):
         'region_name': options.os_region_name,
     }
 
-    # Handle trailing '/' in URL
-    if options.auth and not options.auth.endswith('/'):
-        options.auth += '/'
-
     if enforce_requires and \
             not (options.auth and options.user and options.key):
         exit('''
@@ -1065,6 +1066,9 @@ Example:
                       default=False, help='Use SERVICENET internal network')
     parser.add_option('-v', '--verbose', action='count', dest='verbose',
                       default=1, help='Print more info')
+    parser.add_option('--debug', action='store_true', dest='debug',
+                      default=False, help='Show the curl commands of all http '
+                      'queries.')
     parser.add_option('-q', '--quiet', action='store_const', dest='verbose',
                       const=0, default=1, help='Suppress status output')
     parser.add_option('-A', '--auth', dest='auth',
@@ -1074,14 +1078,14 @@ Example:
                       dest='auth_version',
                       default=environ.get('ST_AUTH_VERSION', '1.0'),
                       type=str,
-                      help='Specify a version for authentication'
-                           '(default: 1.0)')
+                      help='Specify a version for authentication. '
+                           'Defaults to 1.0.')
     parser.add_option('-U', '--user', dest='user',
                       default=environ.get('ST_USER'),
-                      help='User name for obtaining an auth token')
+                      help='User name for obtaining an auth token.')
     parser.add_option('-K', '--key', dest='key',
                       default=environ.get('ST_KEY'),
-                      help='Key for obtaining an auth token')
+                      help='Key for obtaining an auth token.')
     parser.add_option('--os-username',
                       metavar='<auth-user-name>',
                       default=environ.get('OS_USERNAME'),
@@ -1097,14 +1101,13 @@ Example:
     parser.add_option('--os-tenant-id',
                       metavar='<auth-tenant-id>',
                       default=environ.get('OS_TENANT_ID'),
-                      help='OpenStack tenant ID.'
-                           'Defaults to env[OS_TENANT_ID]')
+                      help='OpenStack tenant ID. Defaults to env[OS_TENANT_ID]')
     parser.add_option('--os_tenant_id',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-tenant-name',
                       metavar='<auth-tenant-name>',
                       default=environ.get('OS_TENANT_NAME'),
-                      help='Openstack tenant name.'
+                      help='Openstack tenant name. '
                            'Defaults to env[OS_TENANT_NAME].')
     parser.add_option('--os_tenant_name',
                       help=SUPPRESS_HELP)
@@ -1123,7 +1126,7 @@ Example:
     parser.add_option('--os-storage-url',
                       metavar='<storage-url>',
                       default=environ.get('OS_STORAGE_URL'),
-                      help='Openstack storage URL.'
+                      help='Openstack storage URL. '
                            'Defaults to env[OS_STORAGE_URL]')
     parser.add_option('--os_storage_url',
                       help=SUPPRESS_HELP)
@@ -1137,15 +1140,31 @@ Example:
     parser.add_option('--os-service-type',
                       metavar='<service-type>',
                       default=environ.get('OS_SERVICE_TYPE'),
-                      help='Openstack Service type.'
+                      help='Openstack Service type. '
                            'Defaults to env[OS_SERVICE_TYPE]')
     parser.add_option('--os_service_type',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-endpoint-type',
                       metavar='<endpoint-type>',
                       default=environ.get('OS_ENDPOINT_TYPE'),
-                      help='Openstack Endpoint type. (publicURL, e.g.)' \
+                      help='Openstack Endpoint type. '
                            'Defaults to env[OS_ENDPOINT_TYPE]')
+    parser.add_option('--os-cacert',
+                      metavar='<ca-certificate>',
+                      default=environ.get('OS_CACERT'),
+                      help='Specify a CA bundle file to use in verifying a '
+                      'TLS (https) server certificate. '
+                      'Defaults to env[OS_CACERT]')
+    default_val = utils.config_true_value(
+                      environ.get('SWIFTCLIENT_INSECURE'))
+    parser.add_option('--insecure',
+                      action="store_true", dest="insecure",
+                      default=default_val,
+                      help='Allow swiftclient to access insecure keystone '
+                           'server. The keystone\'s certificate will not '
+                           'be verified. '
+                           'Defaults to env[SWIFTCLIENT_INSECURE] '
+                           '(set to \'true\' to enable).')
     parser.disable_interspersed_args()
     (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
     parser.enable_interspersed_args()
@@ -1158,6 +1177,10 @@ Example:
         exit()
 
     signal.signal(signal.SIGINT, attempt_graceful_exit)
+
+    if options.debug:
+        logger = logging.getLogger("swiftclient")
+        logging.basicConfig(level=logging.DEBUG)
 
     print_queue = Queue(10000)
 
