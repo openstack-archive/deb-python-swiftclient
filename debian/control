@@ -13,9 +13,11 @@ Build-Depends-Indep: openstack-pkg-tools,
  python-eventlet,
  python-httplib2,
  python-nose,
+ python-nosexcover,
  python-setuptools,
- python-simplejson
-Standards-Version: 3.9.3
+ python-simplejson,
+ python-testtools
+Standards-Version: 3.9.4
 Homepage: https://github.com/openstack/python-swiftclient
 Vcs-Git: git://git.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://git.debian.org/?p=openstack/python-swiftclient.git;a=summary
@@ -26,7 +28,8 @@ Pre-Depends: dpkg (>= 1.15.6~)
 Depends: ${python:Depends}, ${misc:Depends},
  python-eventlet,
  python-httplib2,
- python-keystoneclient
+ python-keystoneclient,
+ python-simplejson
 Replaces: swift (<< 1.6.0)
 Description: Client libary for Openstack Swift API
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
