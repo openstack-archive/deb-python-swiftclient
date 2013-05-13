@@ -30,7 +30,13 @@ from time import sleep, time
 from traceback import format_exception
 from urllib import quote, unquote
 
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
 from swiftclient import Connection, ClientException, HTTPException, utils
+from swiftclient.version import version_info
 
 
 def get_conn(options):
@@ -110,6 +116,8 @@ class QueueFunctionThread(Thread):
         self.args = args
         self.kwargs = kwargs
         self.exc_infos = []
+        self.results = []
+        self.store_results = kwargs.pop('store_results', False)
 
     def run(self):
         while True:
@@ -122,7 +130,9 @@ class QueueFunctionThread(Thread):
             else:
                 try:
                     if not self.abort:
-                        self.func(item, *self.args, **self.kwargs)
+                        res = self.func(item, *self.args, **self.kwargs)
+                        if self.store_results:
+                            self.results.append(res)
                 except Exception:
                     self.exc_infos.append(exc_info())
                 finally:
@@ -170,19 +180,23 @@ def st_delete(parser, args, print_queue, error_queue):
     def _delete_object((container, obj), conn):
         try:
             old_manifest = None
+            query_string = None
             if not options.leave_segments:
                 try:
-                    old_manifest = conn.head_object(container, obj).get(
-                        'x-object-manifest')
+                    headers = conn.head_object(container, obj)
+                    old_manifest = headers.get('x-object-manifest')
+                    if utils.config_true_value(
+                            headers.get('x-static-large-object')):
+                        query_string = 'multipart-manifest=delete'
                 except ClientException, err:
                     if err.http_status != 404:
                         raise
-            conn.delete_object(container, obj)
+            conn.delete_object(container, obj, query_string=query_string)
             if old_manifest:
                 segment_queue = Queue(10000)
                 scontainer, sprefix = old_manifest.split('/', 1)
                 scontainer = unquote(scontainer)
-                sprefix = unquote(sprefix)
+                sprefix = unquote(sprefix).rstrip('/') + '/'
                 for delobj in conn.get_container(scontainer,
                                                  prefix=sprefix)[1]:
                     segment_queue.put((scontainer, delobj['name']))
@@ -526,7 +540,7 @@ def st_list(parser, args, print_queue, error_queue):
     args = args[1:]
     if options.delimiter and not args:
         exit('-d option only allowed for container listings')
-    if len(args) > 1:
+    if len(args) > 1 or len(args) == 1 and args[0].find('/') >= 0:
         error_queue.put('Usage: %s [options] %s' %
                         (basename(argv[0]), st_list_help))
         return
@@ -700,6 +714,10 @@ def st_post(parser, args, print_queue, error_queue):
     parser.add_option('-m', '--meta', action='append', dest='meta', default=[],
         help='Sets a meta data item with the syntax name:value. This option '
         'may be repeated. Example: -m Color:Blue -m Size:Large')
+    parser.add_option('-H', '--header', action='append', dest='header',
+        default=[], help='Set request headers with the syntax header:value. '
+        ' This option may be repeated. Example -H content-type:text/plain '
+        '-H "Content-Length: 4000"')
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if (options.read_acl or options.write_acl or options.sync_to or
@@ -736,6 +754,8 @@ def st_post(parser, args, print_queue, error_queue):
             conn.put_container(args[0], headers=headers)
     elif len(args) == 2:
         headers = split_headers(options.meta, 'X-Object-Meta-', error_queue)
+        # add header options to the headers object for the request.
+        headers.update(split_headers(options.header, '', error_queue))
         try:
             conn.post_object(args[0], args[1], headers=headers)
         except ClientException, err:
@@ -753,7 +773,9 @@ upload [options] container file_or_directory [file_or_directory] [...]
     Uploads to the given container the files and directories specified by the
     remaining args. -c or --changed is an option that will only upload files
     that have changed since the last upload. -S <size> or --segment-size <size>
-    and --leave-segments are options as well (see --help for more).
+    will upload the files in segments no larger than size. -C <container> or
+    --segment-container <container> will specify the location of the segments
+    to <container>. --leave-segments are options as well (see --help for more).
 '''.strip('\n')
 
 
@@ -764,7 +786,10 @@ def st_upload(parser, args, print_queue, error_queue):
     parser.add_option('-S', '--segment-size', dest='segment_size', help='Will '
         'upload files in segments no larger than <size> and then create a '
         '"manifest" file that will download all the segments as if it were '
-        'the original file. The segments will be uploaded to a '
+        'the original file.')
+    parser.add_option('-C', '--segment-container', dest='segment_container',
+        help='Will upload the segments into the specified container.'
+        'If not specified, the segments will be uploaded to '
         '<container>_segments container so as to not pollute the main '
         '<container> listings.')
     parser.add_option('', '--leave-segments', action='store_true',
@@ -777,6 +802,14 @@ def st_upload(parser, args, print_queue, error_queue):
     parser.add_option('', '--segment-threads', type=int,
                       default=10, help='Number of threads to use for '
                       'uploading object segments')
+    parser.add_option('-H', '--header', action='append', dest='header',
+        default=[], help='Set request headers with the syntax header:value. '
+        ' This option may be repeated. Example -H content-type:text/plain '
+        '-H "Content-Length: 4000"')
+    parser.add_option('', '--use-slo', action='store_true', default=False,
+                      help='When used in conjuction with --segment-size will '
+                      'create a Static Large Object instead of the default '
+                      'Dynamic Large Object.')
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if len(args) < 2:
@@ -791,14 +824,20 @@ def st_upload(parser, args, print_queue, error_queue):
         else:
             fp = open(job['path'], 'rb')
             fp.seek(job['segment_start'])
-            conn.put_object(job.get('container', args[0] + '_segments'),
+            seg_container = args[0] +'_segments'
+            if options.segment_container:
+               seg_container = options.segment_container
+            etag = conn.put_object(job.get('container', seg_container),
                 job['obj'], fp, content_length=job['segment_size'])
+            job['segment_location'] = '/%s/%s' % (seg_container, job['obj'])
+            job['segment_etag'] = etag
         if options.verbose and 'log_line' in job:
             if conn.attempts > 1:
                 print_queue.put('%s [after %d attempts]' %
                                 (job['log_line'], conn.attempts))
             else:
                 print_queue.put(job['log_line'])
+        return job
 
     def _object_job(job, conn):
         path = job['path']
@@ -835,6 +874,8 @@ def st_upload(parser, args, print_queue, error_queue):
                 # manifest object and need to delete the old segments
                 # ourselves.
                 old_manifest = None
+                old_slo_manifest_paths = []
+                new_slo_manifest_paths = set()
                 if options.changed or not options.leave_segments:
                     try:
                         headers = conn.head_object(container, obj)
@@ -845,17 +886,34 @@ def st_upload(parser, args, print_queue, error_queue):
                             return
                         if not options.leave_segments:
                             old_manifest = headers.get('x-object-manifest')
+                            if utils.config_true_value(
+                                    headers.get('x-static-large-object')):
+                                headers, manifest_data = conn.get_object(
+                                    container, obj,
+                                    query_string='multipart-manifest=get')
+                                for old_seg in json.loads(manifest_data):
+                                    seg_path = old_seg['name'].lstrip('/')
+                                    if isinstance(seg_path, unicode):
+                                        seg_path = seg_path.encode('utf-8')
+                                    old_slo_manifest_paths.append(seg_path)
                     except ClientException, err:
                         if err.http_status != 404:
                             raise
+                # Merge the command line header options to the put_headers
+                put_headers.update(split_headers(options.header, '',
+                                                 error_queue))
                 # Don't do segment job if object is not big enough
                 if options.segment_size and \
                         getsize(path) > int(options.segment_size):
+                    seg_container = container + '_segments'
+                    if options.segment_container:
+                        seg_container = options.segment_container
                     full_size = getsize(path)
                     segment_queue = Queue(10000)
-                    segment_threads = [QueueFunctionThread(segment_queue,
-                        _segment_job, create_connection()) for _junk in
-                        xrange(options.segment_threads)]
+                    segment_threads = [
+                        QueueFunctionThread(segment_queue,
+                        _segment_job, create_connection(), store_results=True)
+                        for _junk in xrange(options.segment_threads)]
                     for thread in segment_threads:
                         thread.start()
                     segment = 0
@@ -864,13 +922,20 @@ def st_upload(parser, args, print_queue, error_queue):
                         segment_size = int(options.segment_size)
                         if segment_start + segment_size > full_size:
                             segment_size = full_size - segment_start
-                        segment_queue.put({'path': path,
-                            'obj': '%s/%s/%s/%s/%08d' % (obj,
-                                put_headers['x-object-meta-mtime'], full_size,
-                                options.segment_size, segment),
-                            'segment_start': segment_start,
-                            'segment_size': segment_size,
-                            'log_line': '%s segment %s' % (obj, segment)})
+                        if options.use_slo:
+                            segment_name = '%s/slo/%s/%s/%s/%08d' % (
+                                obj, put_headers['x-object-meta-mtime'],
+                                full_size, options.segment_size, segment)
+                        else:
+                            segment_name = '%s/%s/%s/%s/%08d' % (
+                                obj, put_headers['x-object-meta-mtime'],
+                                full_size, options.segment_size, segment)
+                        segment_queue.put(
+                            {'path': path, 'obj': segment_name,
+                             'segment_start': segment_start,
+                             'segment_size': segment_size,
+                             'segment_index': segment,
+                             'log_line': '%s segment %s' % (obj, segment)})
                         segment += 1
                         segment_start += segment_size
                     while not segment_queue.empty():
@@ -883,27 +948,59 @@ def st_upload(parser, args, print_queue, error_queue):
                         raise ClientException('Aborting manifest creation '
                             'because not all segments could be uploaded. %s/%s'
                             % (container, obj))
-                    new_object_manifest = '%s_segments/%s/%s/%s/%s' % (
-                        quote(container), quote(obj),
-                        put_headers['x-object-meta-mtime'], full_size,
-                            options.segment_size)
-                    if old_manifest == new_object_manifest:
-                        old_manifest = None
-                    put_headers['x-object-manifest'] = new_object_manifest
-                    conn.put_object(container, obj, '', content_length=0,
-                                    headers=put_headers)
+                    if options.use_slo:
+                        slo_segments = []
+                        for thread in segment_threads:
+                            slo_segments += thread.results
+                        slo_segments.sort(key=lambda d: d['segment_index'])
+                        for seg in slo_segments:
+                            seg_loc = seg['segment_location'].lstrip('/')
+                            if isinstance(seg_loc, unicode):
+                                seg_loc = seg_loc.encode('utf-8')
+                            new_slo_manifest_paths.add(seg_loc)
+
+                        manifest_data = json.dumps([
+                            {'path': d['segment_location'],
+                             'etag': d['segment_etag'],
+                             'size_bytes': d['segment_size']}
+                            for d in slo_segments])
+
+                        put_headers['x-static-large-object'] = 'true'
+                        conn.put_object(container, obj, manifest_data,
+                                        headers=put_headers,
+                                        query_string='multipart-manifest=put')
+                    else:
+                        new_object_manifest = '%s/%s/%s/%s/%s/' % (
+                            quote(seg_container), quote(obj),
+                            put_headers['x-object-meta-mtime'], full_size,
+                                options.segment_size)
+                        if old_manifest and old_manifest.rstrip('/') == \
+                                new_object_manifest.rstrip('/'):
+                            old_manifest = None
+                        put_headers['x-object-manifest'] = new_object_manifest
+                        conn.put_object(container, obj, '', content_length=0,
+                                        headers=put_headers)
                 else:
                     conn.put_object(container, obj, open(path, 'rb'),
                         content_length=getsize(path), headers=put_headers)
-                if old_manifest:
+                if old_manifest or old_slo_manifest_paths:
                     segment_queue = Queue(10000)
-                    scontainer, sprefix = old_manifest.split('/', 1)
-                    scontainer = unquote(scontainer)
-                    sprefix = unquote(sprefix)
-                    for delobj in conn.get_container(scontainer,
-                                                     prefix=sprefix)[1]:
-                        segment_queue.put({'delete': True,
-                            'container': scontainer, 'obj': delobj['name']})
+                    if old_manifest:
+                        scontainer, sprefix = old_manifest.split('/', 1)
+                        scontainer = unquote(scontainer)
+                        sprefix = unquote(sprefix).rstrip('/') + '/'
+                        for delobj in conn.get_container(scontainer,
+                                                         prefix=sprefix)[1]:
+                            segment_queue.put({'delete': True,
+                                'container': scontainer, 'obj': delobj['name']})
+                    if old_slo_manifest_paths:
+                        for seg_to_delete in old_slo_manifest_paths:
+                            if seg_to_delete in new_slo_manifest_paths:
+                                continue
+                            scont, sobj = \
+                                seg_to_delete.split('/', 1)
+                            segment_queue.put({'delete': True,
+                                'container': scont, 'obj': sobj})
                     if not segment_queue.empty():
                         segment_threads = [QueueFunctionThread(segment_queue,
                             _segment_job, create_connection()) for _junk in
@@ -953,7 +1050,10 @@ def st_upload(parser, args, print_queue, error_queue):
     try:
         conn.put_container(args[0])
         if options.segment_size is not None:
-            conn.put_container(args[0] + '_segments')
+            seg_container = args[0] + '_segments'
+            if options.segment_container:
+               seg_container = options.segment_container
+            conn.put_container(seg_container)
     except ClientException, err:
         msg = ' '.join(str(x) for x in (err.http_status, err.http_reason))
         if err.http_response_content:
@@ -996,7 +1096,7 @@ def split_headers(options, prefix='', error_queue=None):
     for item in options:
         split_item = item.split(':', 1)
         if len(split_item) == 2:
-            headers[prefix + split_item[0]] = split_item[1]
+            headers[(prefix + split_item[0]).title()] = split_item[1]
         else:
             error_string = "Metadata parameter %s must contain a ':'.\n%s" \
                            % (item, st_post_help)
@@ -1035,6 +1135,11 @@ def parse_args(parser, args, enforce_requires=True):
         'region_name': options.os_region_name,
     }
 
+    if (options.os_options.get('object_storage_url') and
+        options.os_options.get('auth_token') and
+        options.auth_version == '2.0'):
+        return options, args
+
     if enforce_requires and \
             not (options.auth and options.user and options.key):
         exit('''
@@ -1048,7 +1153,9 @@ OS_TENANT_NAME OS_TENANT_ID to be set or overridden with --os-auth-url,
 
 
 if __name__ == '__main__':
-    parser = OptionParser(version='%prog 1.0', usage='''
+    version = version_info.version_string()
+    parser = OptionParser(version='%%prog %s' % version,
+                          usage='''
 Usage: %%prog <command> [options] [args]
 
 Commands:
@@ -1059,8 +1166,15 @@ Commands:
   %(st_download_help)s
   %(st_delete_help)s
 
-Example:
+Examples:
   %%prog -A https://auth.api.rackspacecloud.com/v1.0 -U user -K key stat
+
+  %%prog --os-auth-url https://api.example.com/v2.0 --os-tenant-name tenant \\
+      --os-usernameuser --os-password password list
+
+  %%prog --os-auth-token 6ee5eb33efad4e45ab46806eac010566 \\
+      --os-storage-url https://10.1.5.2:8080/v1/AUTH_ced809b6a4baea7aeab61a \\
+      list
 '''.strip('\n') % globals())
     parser.add_option('-s', '--snet', action='store_true', dest='snet',
                       default=False, help='Use SERVICENET internal network')
@@ -1101,7 +1215,8 @@ Example:
     parser.add_option('--os-tenant-id',
                       metavar='<auth-tenant-id>',
                       default=environ.get('OS_TENANT_ID'),
-                      help='OpenStack tenant ID. Defaults to env[OS_TENANT_ID]')
+                      help='OpenStack tenant ID. '
+                      'Defaults to env[OS_TENANT_ID]')
     parser.add_option('--os_tenant_id',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-tenant-name',
@@ -1120,14 +1235,18 @@ Example:
     parser.add_option('--os-auth-token',
                       metavar='<auth-token>',
                       default=environ.get('OS_AUTH_TOKEN'),
-                      help='Openstack token. Defaults to env[OS_AUTH_TOKEN]')
+                      help='Openstack token. Defaults to env[OS_AUTH_TOKEN]. '
+                           'Used with --os-storage-url to bypass the '
+                           'usual username/password authentication.')
     parser.add_option('--os_auth_token',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-storage-url',
                       metavar='<storage-url>',
                       default=environ.get('OS_STORAGE_URL'),
                       help='Openstack storage URL. '
-                           'Defaults to env[OS_STORAGE_URL]')
+                           'Defaults to env[OS_STORAGE_URL]. '
+                           'Used with --os-auth-token to bypass the '
+                           'usual username/password authentication.')
     parser.add_option('--os_storage_url',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-region-name',

@@ -17,6 +17,7 @@
 import socket
 import StringIO
 import testtools
+import warnings
 from urlparse import urlparse
 
 # TODO: mock http connection class with more control over headers
@@ -46,7 +47,7 @@ class TestClientException(testtools.TestCase):
         )
         for value in test_kwargs:
             kwargs = {
-               'http_%s' % value: value,
+                'http_%s' % value: value,
             }
             exc = c.ClientException('test', **kwargs)
             self.assertTrue(value in str(exc))
@@ -69,7 +70,6 @@ class TestJsonImport(testtools.TestCase):
         else:
             reload(simplejson)
         super(TestJsonImport, self).tearDown()
-
 
     def test_any(self):
         self.assertTrue(hasattr(c, 'json_loads'))
@@ -118,16 +118,18 @@ class MockHttpTest(testtools.TestCase):
     def setUp(self):
         super(MockHttpTest, self).setUp()
 
-
         def fake_http_connection(*args, **kwargs):
             _orig_http_connection = c.http_connection
             return_read = kwargs.get('return_read')
+            query_string = kwargs.get('query_string')
 
             def wrapper(url, proxy=None):
                 parsed, _conn = _orig_http_connection(url, proxy=proxy)
                 conn = fake_http_connect(*args, **kwargs)()
 
-                def request(*args, **kwargs):
+                def request(method, url, *args, **kwargs):
+                    if query_string:
+                        self.assert_(url.endswith('?' + query_string))
                     return
                 conn.request = request
 
@@ -209,7 +211,7 @@ class TestGetAuth(MockHttpTest):
         self.assertEquals(token, None)
 
     def test_auth_v2(self):
-        os_options={'tenant_name': 'asdf'}
+        os_options = {'tenant_name': 'asdf'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
@@ -244,9 +246,9 @@ class TestGetAuth(MockHttpTest):
         self.assertTrue(token)
 
     def test_auth_v2_with_os_options(self):
-        os_options={'service_type': 'object-store',
-                    'endpoint_type': 'internalURL',
-                    'tenant_name': 'asdf'}
+        os_options = {'service_type': 'object-store',
+                      'endpoint_type': 'internalURL',
+                      'tenant_name': 'asdf'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
@@ -258,13 +260,13 @@ class TestGetAuth(MockHttpTest):
         tenant_option = {'tenant_name': 'foo'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(tenant_option)
         url, token = c.get_auth('http://www.test.com', 'foo:bar', 'asdf',
-                                 auth_version="2.0")
+                                auth_version="2.0")
         self.assertTrue(url.startswith("http"))
         self.assertTrue(token)
 
     def test_auth_v2_with_os_region_name(self):
-        os_options={'region_name': 'good-region',
-                    'tenant_name': 'asdf'}
+        os_options = {'region_name': 'good-region',
+                      'tenant_name': 'asdf'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
@@ -273,19 +275,17 @@ class TestGetAuth(MockHttpTest):
         self.assertTrue(token)
 
     def test_auth_v2_no_endpoint(self):
-        os_options={'region_name': 'unknown_region',
-                    'tenant_name': 'asdf'}
+        os_options = {'region_name': 'unknown_region',
+                      'tenant_name': 'asdf'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
-                                       os_options,
-                                       c.ClientException)
+            os_options, c.ClientException)
         self.assertRaises(c.ClientException, c.get_auth,
                           'http://www.tests.com', 'asdf', 'asdf',
                           os_options=os_options, auth_version='2.0')
 
     def test_auth_v2_ks_exception(self):
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
-                                       {},
-                                       c.ClientException)
+            {}, c.ClientException)
         self.assertRaises(c.ClientException, c.get_auth,
                           'http://www.tests.com', 'asdf', 'asdf',
                           os_options={},
@@ -294,10 +294,9 @@ class TestGetAuth(MockHttpTest):
     def test_auth_v2_cacert(self):
         os_options = {'tenant_name': 'foo'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
-                                       os_options,
-                                       None)
+            os_options, None)
 
-        auth_url_secure   = 'https://www.tests.com'
+        auth_url_secure = 'https://www.tests.com'
         auth_url_insecure = 'https://www.tests.com/self-signed-certificate'
 
         url, token = c.get_auth(auth_url_secure, 'asdf', 'asdf',
@@ -323,10 +322,9 @@ class TestGetAuth(MockHttpTest):
     def test_auth_v2_insecure(self):
         os_options = {'tenant_name': 'foo'}
         c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
-                                       os_options,
-                                       None)
+            os_options, None)
 
-        auth_url_secure   = 'https://www.tests.com'
+        auth_url_secure = 'https://www.tests.com'
         auth_url_insecure = 'https://www.tests.com/invalid-certificate'
 
         url, token = c.get_auth(auth_url_secure, 'asdf', 'asdf',
@@ -393,8 +391,8 @@ class TestHeadContainer(MockHttpTest):
         body = 'c' * 60
         c.http_connection = self.fake_http_connection(500, body=body)
         self.assertRaises(c.ClientException, c.head_container,
-                         'http://www.test.com', 'asdf', 'asdf',
-                         )
+                          'http://www.test.com', 'asdf', 'asdf',
+                          )
         try:
             value = c.head_container('http://www.test.com', 'asdf', 'asdf')
         except c.ClientException as e:
@@ -412,8 +410,8 @@ class TestPutContainer(MockHttpTest):
         body = 'c' * 60
         c.http_connection = self.fake_http_connection(500, body=body)
         self.assertRaises(c.ClientException, c.put_container,
-                         'http://www.test.com', 'asdf', 'asdf',
-                         )
+                          'http://www.test.com', 'asdf', 'asdf',
+                          )
         try:
             value = c.put_container('http://www.test.com', 'asdf', 'asdf')
         except c.ClientException as e:
@@ -434,6 +432,12 @@ class TestGetObject(MockHttpTest):
         c.http_connection = self.fake_http_connection(500)
         self.assertRaises(c.ClientException, c.get_object,
                           'http://www.test.com', 'asdf', 'asdf', 'asdf')
+
+    def test_query_string(self):
+        c.http_connection = self.fake_http_connection(200,
+                                                      query_string="hello=20")
+        c.get_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
+                     query_string="hello=20")
 
 
 class TestHeadObject(MockHttpTest):
@@ -470,7 +474,26 @@ class TestPutObject(MockHttpTest):
         self.assertTrue(isinstance(value, basestring))
         # Test for RFC-2616 encoded symbols
         self.assertTrue("a-b: .x:yz mn:fg:lp" in resp.buffer[0],
-                      "[a-b: .x:yz mn:fg:lp] header is missing")
+                        "[a-b: .x:yz mn:fg:lp] header is missing")
+
+    def test_chunk_warning(self):
+        conn = c.http_connection('http://www.test.com/')
+        file = StringIO.StringIO('asdf')
+        args = ('asdf', 'asdf', 'asdf', 'asdf', file)
+        resp = MockHttpResponse()
+        conn[1].getresponse = resp.fake_response
+        conn[1].send = resp.fake_send
+        with warnings.catch_warnings(record=True) as w:
+            c.put_object(*args, chunk_size=20, headers={}, http_conn=conn)
+            self.assertEquals(len(w), 0)
+
+        body = 'c' * 60
+        c.http_connection = self.fake_http_connection(200, body=body)
+        args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', 'asdf')
+        with warnings.catch_warnings(record=True) as w:
+            c.put_object(*args, chunk_size=20)
+            self.assertEquals(len(w), 1)
+            self.assertTrue(issubclass(w[-1].category, UserWarning))
 
     def test_server_error(self):
         body = 'c' * 60
@@ -481,6 +504,12 @@ class TestPutObject(MockHttpTest):
             value = c.put_object(*args)
         except c.ClientException as e:
             self.assertEquals(e.http_response_content, body)
+
+    def test_query_string(self):
+        c.http_connection = self.fake_http_connection(200,
+                                                      query_string="hello=20")
+        c.put_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
+                     query_string="hello=20")
 
 
 class TestPostObject(MockHttpTest):
@@ -505,7 +534,7 @@ class TestPostObject(MockHttpTest):
         c.post_object(*args, headers=headers, http_conn=conn)
         # Test for RFC-2616 encoded symbols
         self.assertTrue("a-b: .x:yz mn:kl:qr" in resp.buffer[0],
-                      "[a-b: .x:yz mn:kl:qr] header is missing")
+                        "[a-b: .x:yz mn:kl:qr] header is missing")
 
     def test_server_error(self):
         body = 'c' * 60
@@ -528,6 +557,12 @@ class TestDeleteObject(MockHttpTest):
         c.http_connection = self.fake_http_connection(500)
         self.assertRaises(c.ClientException, c.delete_object,
                           'http://www.test.com', 'asdf', 'asdf', 'asdf')
+
+    def test_query_string(self):
+        c.http_connection = self.fake_http_connection(200,
+                                                      query_string="hello=20")
+        c.delete_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
+                        query_string="hello=20")
 
 
 class TestConnection(MockHttpTest):
@@ -609,7 +644,7 @@ class TestConnection(MockHttpTest):
         conn = c.Connection('http://www.test.com', 'asdf', 'asdf',
                             preauthurl='http://www.old.com',
                             preauthtoken='old',
-                           )
+                            )
 
         self.assertEquals(conn.attempts, 0)
         self.assertEquals(conn.url, 'http://www.old.com')
@@ -715,7 +750,7 @@ class TestConnection(MockHttpTest):
                 exc = err
             self.assertEquals(contents.seeks, [])
             self.assertEquals(str(exc), "put_object('c', 'o', ...) failure "
-                "and no ability to reset contents for reupload.")
+                              "and no ability to reset contents for reupload.")
         finally:
             c.http_connection = orig_conn
 

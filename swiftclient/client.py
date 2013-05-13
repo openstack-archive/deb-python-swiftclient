@@ -19,7 +19,9 @@ Cloud Files client library used internally
 
 import socket
 import os
+import sys
 import logging
+import warnings
 from functools import wraps
 
 from urllib import quote as _quote
@@ -240,8 +242,15 @@ def get_keystoneclient_2_0(auth_url, user, key, os_options, **kwargs):
     insecure = kwargs.get('insecure', False)
     debug = logger.isEnabledFor(logging.DEBUG) and True or False
 
-    from keystoneclient.v2_0 import client as ksclient
-    from keystoneclient import exceptions
+    try:
+        from keystoneclient.v2_0 import client as ksclient
+        from keystoneclient import exceptions
+    except ImportError:
+        sys.exit('''
+Auth version 2.0 requires python-keystoneclient, install it or use Auth
+version 1.0 which requires ST_AUTH, ST_USER, and ST_KEY environment
+variables to be set or overridden with -A, -U, or -K.''')
+
     try:
         _ksclient = ksclient.Client(username=user,
                                     password=key,
@@ -663,7 +672,7 @@ def delete_container(url, token, container, http_conn=None):
 
 
 def get_object(url, token, container, name, http_conn=None,
-               resp_chunk_size=None):
+               resp_chunk_size=None, query_string=None):
     """
     Get an object
 
@@ -677,6 +686,7 @@ def get_object(url, token, container, name, http_conn=None,
                             you specify a resp_chunk_size you must fully read
                             the object's contents before making another
                             request.
+    :param query_string: if set will be appended with '?' to generated path
     :returns: a tuple of (response headers, the object's contents) The response
               headers will be a dict and all header names will be lowercase.
     :raises ClientException: HTTP GET request failed
@@ -686,6 +696,8 @@ def get_object(url, token, container, name, http_conn=None,
     else:
         parsed, conn = http_connection(url)
     path = '%s/%s/%s' % (parsed.path, quote(container), quote(name))
+    if query_string:
+        path += '?' + query_string
     method = 'GET'
     headers = {'X-Auth-Token': token}
     conn.request(method, path, '', headers)
@@ -756,8 +768,9 @@ def head_object(url, token, container, name, http_conn=None):
 
 
 def put_object(url, token=None, container=None, name=None, contents=None,
-               content_length=None, etag=None, chunk_size=65536,
-               content_type=None, headers=None, http_conn=None, proxy=None):
+               content_length=None, etag=None, chunk_size=None,
+               content_type=None, headers=None, http_conn=None, proxy=None,
+               query_string=None):
     """
     Put an object
 
@@ -774,7 +787,9 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                            computed via the contents or chunked transfer
                            encoding will be used
     :param etag: etag of contents; if None, no etag will be sent
-    :param chunk_size: chunk size of data to write; default 65536
+    :param chunk_size: chunk size of data to write; it defaults to 65536;
+                       used only if the the contents object has a 'read'
+                       method, eg. file-like objects, ignored otherwise
     :param content_type: value to send as content-type header; if None, no
                          content-type will be set (remote end will likely try
                          to auto-detect it)
@@ -783,6 +798,7 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                       conn object)
     :param proxy: proxy to connect through, if any; None by default; str of the
                   format 'http://127.0.0.1:8888' to set one
+    :param query_string: if set will be appended with '?' to generated path
     :returns: etag from server response
     :raises ClientException: HTTP PUT request failed
     """
@@ -795,6 +811,8 @@ def put_object(url, token=None, container=None, name=None, contents=None,
         path = '%s/%s' % (path.rstrip('/'), quote(container))
     if name:
         path = '%s/%s' % (path.rstrip('/'), quote(name))
+    if query_string:
+        path += '?' + query_string
     if headers:
         headers = dict(headers)
     else:
@@ -814,6 +832,8 @@ def put_object(url, token=None, container=None, name=None, contents=None,
     if not contents:
         headers['Content-Length'] = '0'
     if hasattr(contents, 'read'):
+        if chunk_size is None:
+            chunk_size = 65536
         conn.putrequest('PUT', path)
         for header, value in headers.iteritems():
             conn.putheader(header, value)
@@ -836,6 +856,10 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                 conn.send(chunk)
                 left -= len(chunk)
     else:
+        if chunk_size is not None:
+            warn_msg = '%s object has no \"read\" method, ignoring chunk_size'\
+                % type(contents).__name__
+            warnings.warn(warn_msg, stacklevel=2)
         conn.request('PUT', path, contents, headers)
     resp = conn.getresponse()
     body = resp.read()
@@ -884,7 +908,7 @@ def post_object(url, token, container, name, headers, http_conn=None):
 
 
 def delete_object(url, token=None, container=None, name=None, http_conn=None,
-                  headers=None, proxy=None):
+                  headers=None, proxy=None, query_string=None):
     """
     Delete object
 
@@ -899,6 +923,7 @@ def delete_object(url, token=None, container=None, name=None, http_conn=None,
     :param headers: additional headers to include in the request
     :param proxy: proxy to connect through, if any; None by default; str of the
                   format 'http://127.0.0.1:8888' to set one
+    :param query_string: if set will be appended with '?' to generated path
     :raises ClientException: HTTP DELETE request failed
     """
     if http_conn:
@@ -910,6 +935,8 @@ def delete_object(url, token=None, container=None, name=None, http_conn=None,
         path = '%s/%s' % (path.rstrip('/'), quote(container))
     if name:
         path = '%s/%s' % (path.rstrip('/'), quote(name))
+    if query_string:
+        path += '?' + query_string
     if headers:
         headers = dict(headers)
     else:
@@ -1068,14 +1095,16 @@ class Connection(object):
         """Wrapper for :func:`head_object`"""
         return self._retry(None, head_object, container, obj)
 
-    def get_object(self, container, obj, resp_chunk_size=None):
+    def get_object(self, container, obj, resp_chunk_size=None,
+                   query_string=None):
         """Wrapper for :func:`get_object`"""
         return self._retry(None, get_object, container, obj,
-                           resp_chunk_size=resp_chunk_size)
+                           resp_chunk_size=resp_chunk_size,
+                           query_string=query_string)
 
     def put_object(self, container, obj, contents, content_length=None,
-                   etag=None, chunk_size=65536, content_type=None,
-                   headers=None):
+                   etag=None, chunk_size=None, content_type=None,
+                   headers=None, query_string=None):
         """Wrapper for :func:`put_object`"""
 
         def _default_reset(*args, **kwargs):
@@ -1083,7 +1112,11 @@ class Connection(object):
                                   'ability to reset contents for reupload.'
                                   % (container, obj))
 
-        reset_func = _default_reset
+        if isinstance(contents, str):
+            # if its a str then you can retry as much as you want
+            reset_func = None
+        else:
+            reset_func = _default_reset
         tell = getattr(contents, 'tell', None)
         seek = getattr(contents, 'seek', None)
         if tell and seek:
@@ -1095,12 +1128,13 @@ class Connection(object):
         return self._retry(reset_func, put_object, container, obj, contents,
                            content_length=content_length, etag=etag,
                            chunk_size=chunk_size, content_type=content_type,
-                           headers=headers)
+                           headers=headers, query_string=query_string)
 
     def post_object(self, container, obj, headers):
         """Wrapper for :func:`post_object`"""
         return self._retry(None, post_object, container, obj, headers)
 
-    def delete_object(self, container, obj):
+    def delete_object(self, container, obj, query_string=None):
         """Wrapper for :func:`delete_object`"""
-        return self._retry(None, delete_object, container, obj)
+        return self._retry(None, delete_object, container, obj,
+                           query_string=query_string)
