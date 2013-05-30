@@ -6,17 +6,16 @@ Uploaders: Julien Danjou <acid@debian.org>,
            Thomas Goirand <zigo@debian.org>,
            Ghe Rivero <ghe.rivero@stackops.com>,
            Mehdi Abaakouk <sileht@sileht.net>
-Build-Depends: debhelper (>= 9),
- python-all (>= 2.6.6-3~)
+Build-Depends: debhelper (>= 9), python-all (>= 2.6.6-3~)
 Build-Depends-Indep: openstack-pkg-tools,
- python-argparse,  
- python-eventlet,
- python-httplib2,
- python-nose,
- python-nosexcover,
- python-setuptools,
- python-simplejson,
- python-testtools
+                     python-argparse,
+                     python-eventlet,
+                     python-httplib2,
+                     python-nose,
+                     python-nosexcover,
+                     python-setuptools,
+                     python-simplejson,
+                     python-testtools
 Standards-Version: 3.9.4
 Homepage: https://github.com/openstack/python-swiftclient
 Vcs-Git: git://git.debian.org/openstack/python-swiftclient.git
@@ -25,11 +24,12 @@ Vcs-Browser: http://git.debian.org/?p=openstack/python-swiftclient.git;a=summary
 Package: python-swiftclient
 Architecture: all
 Pre-Depends: dpkg (>= 1.15.6~)
-Depends: ${python:Depends}, ${misc:Depends},
- python-eventlet,
- python-httplib2,
- python-keystoneclient,
- python-simplejson
+Depends: python-eventlet,
+         python-httplib2,
+         python-keystoneclient,
+         python-simplejson,
+         ${misc:Depends},
+         ${python:Depends}
 Replaces: swift (<< 1.6.0)
 Description: Client libary for Openstack Swift API
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
@@ -37,7 +37,7 @@ Description: Client libary for Openstack Swift API
  accessible data. It is not a file system or real-time data storage system, but
  rather a long-term storage system for a more permanent type of static data
  that can be retrieved, leveraged, and then updated if necessary. Primary
- examples of data that best fit this type of storage model are virtual machine 
+ examples of data that best fit this type of storage model are virtual machine
  images, photo storage, email storage and backup archiving. Having no central
  "brain" or master point of control provides greater scalability, redundancy
  and permanence.
