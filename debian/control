@@ -31,7 +31,7 @@ Depends: python-eventlet,
          ${misc:Depends},
          ${python:Depends}
 Replaces: swift (<< 1.6.0)
-Description: Client libary for Openstack Swift API
+Description: Client library for Openstack Swift API
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
  accessible data. It is not a file system or real-time data storage system, but
