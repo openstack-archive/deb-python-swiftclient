@@ -1,3 +1,9 @@
+python-swiftclient (1:1.6.0-2) unstable; urgency=low
+
+  * Added missing build-depends: python-d2to1.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 11 Sep 2013 09:47:14 +0000
+
 python-swiftclient (1:1.6.0-1) unstable; urgency=low
 
   * New upstream release.
