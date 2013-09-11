@@ -2,6 +2,8 @@ python-swiftclient (1:1.6.0-1) unstable; urgency=low
 
   * New upstream release.
   * Removes now obsolete patch for OSLO version.
+  * Now using testrepository for the unit testing.
+  * Updated (build-)dependencies.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 11 Sep 2013 14:03:08 +0800
 

@@ -15,5 +15,5 @@ override_dh_auto_clean:
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	set -e ; for pyversion in $(shell pyversions -r); do $$pyversion setup.py test; done
+	python setup.py testr
 endif
