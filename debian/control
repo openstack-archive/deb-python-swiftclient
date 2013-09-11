@@ -20,9 +20,9 @@ Build-Depends-Indep: python-eventlet,
                      python-testtools,
                      testrepository (>= 0.0.13)
 Standards-Version: 3.9.4
+Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
+Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git
 Homepage: https://github.com/openstack/python-swiftclient
-Vcs-Git: git://git.debian.org/openstack/python-swiftclient.git
-Vcs-Browser: http://git.debian.org/?p=openstack/python-swiftclient.git;a=summary
 
 Package: python-swiftclient
 Architecture: all
