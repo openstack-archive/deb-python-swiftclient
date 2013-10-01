@@ -15,5 +15,5 @@ override_dh_auto_clean:
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	python setup.py testr
+	python setup.py testr --slowest --testr-args='--subunit  '
 endif
