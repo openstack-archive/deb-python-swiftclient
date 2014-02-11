@@ -23,7 +23,7 @@ Build-Depends-Indep: python-coverage (>= 3.6),
                      python-sphinx (>= 1.1.2),
                      python-testtools (>= 0.9.32),
                      testrepository (>= 0.0.17)
-Standards-Version: 3.9.4
+Standards-Version: 3.9.5
 Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git
 Homepage: https://github.com/openstack/python-swiftclient
