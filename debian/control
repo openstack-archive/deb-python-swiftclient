@@ -11,15 +11,18 @@ Build-Depends: debhelper (>= 9),
                python-all (>= 2.6.6-3~),
                python-d2to1,
                python-pbr
-Build-Depends-Indep: python-eventlet,
+Build-Depends-Indep: python-coverage (>= 3.6),
+                     python-eventlet,
                      python-httplib2,
-                     python-mock,
+                     python-keystoneclient (>= 1:0.3.2),
+                     python-mock (>= 1.0),
                      python-nose,
                      python-nosexcover,
                      python-setuptools,
                      python-simplejson,
-                     python-testtools,
-                     testrepository (>= 0.0.13)
+                     python-sphinx (>= 1.1.2),
+                     python-testtools (>= 0.9.32),
+                     testrepository (>= 0.0.17)
 Standards-Version: 3.9.4
 Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git

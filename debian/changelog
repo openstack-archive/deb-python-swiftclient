@@ -1,6 +1,7 @@
 python-swiftclient (1:1.8.0-1) UNRELEASED; urgency=low
 
   * New upstream release.
+  * Reviewed build-dependency for the new upstream release.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 11 Feb 2014 23:31:15 +0800
 
