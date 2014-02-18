@@ -32,8 +32,9 @@ try:
 except ImportError:
     import json
 
-from swiftclient import Connection, HTTPException
-from swiftclient.utils import config_true_value
+from swiftclient import Connection, RequestException
+from swiftclient import command_helpers
+from swiftclient.utils import config_true_value, prt_bytes
 from swiftclient.multithreading import MultiThreadingManager
 from swiftclient.exceptions import ClientException
 from swiftclient import __version__ as client_version
@@ -70,7 +71,7 @@ def immediate_exit(signum, frame):
 st_delete_options = '''[-all] [--leave-segments]
                     [--object-threads <threads>]
                     [--container-threads <threads>]
-                    <container> <object>
+                    <container> [object]
 '''
 
 st_delete_help = '''
@@ -78,16 +79,18 @@ Delete a container or objects within a container
 
 Positional arguments:
   <container>           Name of container to delete from
-  <object>              Name of object to delete. Specify multiple times
+  [object]              Name of object to delete. Specify multiple times
                         for multiple objects
 
 Optional arguments:
   --all                 Delete all containers and objects
   --leave-segments      Do not delete segments of manifest objects
   --object-threads <threads>
-                        Number of threads to use for deleting objects
+                        Number of threads to use for deleting objects.
+                        Default is 10
   --container-threads <threads>
-                        Number of threads to use for deleting containers
+                        Number of threads to use for deleting containers.
+                        Default is 10
 '''.strip("\n")
 
 
@@ -237,16 +240,18 @@ def st_delete(parser, args, thread_manager):
 st_download_options = '''[--all] [--marker] [--prefix <prefix>]
                       [--output <out_file>] [--object-threads <threads>]
                       [--container-threads <threads>] [--no-download]
-                      <container> <object>
+                      <container> [object]
 '''
 
 st_download_help = '''
 Download objects from containers
 
 Positional arguments:
-  <container>           Name of container to download from
-  <object>              Name of object to download. Specify multiple times
-                        for multiple objects
+  <container>           Name of container to download from. To download a
+                        whole account, omit this and specify --all.
+  [object]              Name of object to download. Specify multiple times
+                        for multiple objects. Omit this to download all
+                        objects from the container.
 
 Optional arguments:
   --all                 Indicates that you really want to download
@@ -258,11 +263,18 @@ Optional arguments:
                         <out_file>. Specifying "-" as <out_file> will
                         redirect to stdout
   --object-threads <threads>
-                        Number of threads to use for downloading objects
+                        Number of threads to use for downloading objects.
+                        Default is 10
   --container-threads <threads>
-                        Number of threads to use for deleting containers
+                        Number of threads to use for downloading containers.
+                        Default is 10
   --no-download         Perform download(s), but don't actually write anything
                         to disk
+  --header <header_name:header_value>
+                        Adds a customized request header to the query, like
+                        "Range" or "If-Match". This argument is repeatable.
+                        Example --header "content-type:text/plain"
+
 '''.strip("\n")
 
 
@@ -286,11 +298,18 @@ def st_download(parser, args, thread_manager):
         default=10, help='Number of threads to use for downloading objects')
     parser.add_option(
         '', '--container-threads', type=int, default=10,
-        help='Number of threads to use for listing containers')
+        help='Number of threads to use for downloading containers')
     parser.add_option(
         '', '--no-download', action='store_true',
         default=False,
         help="Perform download(s), but don't actually write anything to disk")
+    parser.add_option(
+        '-H', '--header', action='append', dest='header',
+        default=[],
+        help='Specify a request header, as --header NAME:VALUE. '
+        'Adds a customized request header to the query, like "Range" or '
+        '"If-Match". This argument is repeatable. Example'
+        ' --header "content-type:text/plain"')
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if options.out_file == '-':
@@ -301,6 +320,7 @@ def st_download(parser, args, thread_manager):
         thread_manager.error('Usage: %s download %s\n%s', basename(argv[0]),
                              st_download_options, st_download_help)
         return
+    req_headers = split_headers(options.header, '', thread_manager)
 
     def _download_object(queue_arg, conn):
         if len(queue_arg) == 2:
@@ -313,8 +333,9 @@ def st_download(parser, args, thread_manager):
         try:
             start_time = time()
             headers, body = \
-                conn.get_object(container, obj, resp_chunk_size=65536)
-            header_receipt = time()
+                conn.get_object(container, obj, resp_chunk_size=65536,
+                                headers=req_headers)
+            headers_receipt = time()
             content_type = headers.get('content-type')
             if 'content-length' in headers:
                 content_length = int(headers.get('content-length'))
@@ -374,9 +395,14 @@ def st_download(parser, args, thread_manager):
                 utime(path, (mtime, mtime))
             if options.verbose:
                 finish_time = time()
-                time_str = 'headers %.3fs, total %.3fs, %.3f MB/s' % (
-                    header_receipt - start_time, finish_time - start_time,
-                    float(read_length) / (finish_time - start_time) / 1000000)
+                auth_time = conn.auth_end_time - start_time
+                headers_receipt = headers_receipt - start_time
+                total_time = finish_time - start_time
+                download_time = total_time - auth_time
+                time_str = ('auth %.3fs, headers %.3fs, total %.3fs, '
+                            '%.3f MB/s' % (
+                                auth_time, headers_receipt, total_time,
+                                float(read_length) / download_time / 1000000))
                 if conn.attempts > 1:
                     thread_manager.print_msg('%s [%s after %d attempts]', path,
                                              time_str, conn.attempts)
@@ -443,9 +469,10 @@ def st_download(parser, args, thread_manager):
                     thread_manager.error('Account not found')
             elif len(args) == 1:
                 if '/' in args[0]:
-                    print >> stderr, ('WARNING: / in container name; you '
-                                      'might have meant %r instead of %r.' % (
-                                      args[0].replace('/', ' ', 1), args[0]))
+                    print >> stderr, (
+                        'WARNING: / in container name; you might have meant '
+                        '%r instead of %r.' % (
+                            args[0].replace('/', ' ', 1), args[0]))
                 container_queue.put((args[0], object_queue, options.prefix))
             else:
                 if len(args) == 2:
@@ -455,47 +482,19 @@ def st_download(parser, args, thread_manager):
                     for obj in args[1:]:
                         object_queue.put((args[0], obj))
 
-
-def prt_bytes(bytes, human_flag):
-    """
-    convert a number > 1024 to printable format, either in 4 char -h format as
-    with ls -lh or return as 12 char right justified string
-    """
-
-    if human_flag:
-        suffix = ''
-        mods = 'KMGTPEZY'
-        temp = float(bytes)
-        if temp > 0:
-            while (temp > 1023):
-                temp /= 1024.0
-                suffix = mods[0]
-                mods = mods[1:]
-            if suffix != '':
-                if temp >= 10:
-                    bytes = '%3d%s' % (temp, suffix)
-                else:
-                    bytes = '%.1f%s' % (temp, suffix)
-        if suffix == '':    # must be < 1024
-            bytes = '%4s' % bytes
-    else:
-        bytes = '%12s' % bytes
-
-    return(bytes)
-
-st_list_options = '''[--long] [--lh] [--totals]
-                  [--container-threads <threads>]
+st_list_options = '''[--long] [--lh] [--totals] [--prefix <prefix>]
+                  [--delimiter <delimiter>]
 '''
 st_list_help = '''
 Lists the containers for the account or the objects for a container
 
 Positional arguments:
-  <container>           Name of container to list object in
+  [container]           Name of container to list object in
 
 Optional arguments:
   --long                Long listing format, similar to ls -l
   --lh                  Report sizes in human readable format similar to ls -lh
-  --totals              Used with -l or --ls, only report totals
+  --totals              Used with -l or --lh, only report totals
   --prefix              Only list items beginning with the prefix
   --delimiter           Roll up items with the given delimiter. For containers
                         only. See OpenStack Swift API documentation for what
@@ -512,7 +511,7 @@ def st_list(parser, args, thread_manager):
         "similar to ls -lh switch, but -h taken", action='store_true',
         default=False)
     parser.add_option(
-        '-t', '--totals', dest='totals', help='used with -l or --ls, '
+        '-t', '--totals', dest='totals', help='used with -l or --lh, '
                                               'only report totals',
         action='store_true', default=False)
     parser.add_option(
@@ -603,15 +602,15 @@ def st_list(parser, args, thread_manager):
             thread_manager.error('Container %r not found', args[0])
 
 st_stat_options = '''[--lh]
-                  <container> <object>
+                  [container] [object]
 '''
 
 st_stat_help = '''
 Displays information for the account, container, or object
 
 Positional arguments:
-  <container>           Name of container to stat from
-  <object>              Name of object to stat. Specify multiple times
+  [container]           Name of container to stat from
+  [object]              Name of object to stat. Specify multiple times
                         for multiple objects
 
 Optional arguments:
@@ -628,34 +627,7 @@ def st_stat(parser, args, thread_manager):
     conn = get_conn(options)
     if not args:
         try:
-            headers = conn.head_account()
-            if options.verbose > 1:
-                thread_manager.print_msg('''
-StorageURL: %s
-Auth Token: %s
-'''.strip('\n'), conn.url, conn.token)
-            container_count = int(headers.get('x-account-container-count', 0))
-            object_count = prt_bytes(headers.get('x-account-object-count', 0),
-                                     options.human).lstrip()
-            bytes_used = prt_bytes(headers.get('x-account-bytes-used', 0),
-                                   options.human).lstrip()
-            thread_manager.print_msg('''
-   Account: %s
-Containers: %d
-   Objects: %s
-     Bytes: %s'''.strip('\n'), conn.url.rsplit('/', 1)[-1], container_count,
-                object_count, bytes_used)
-            for key, value in headers.items():
-                if key.startswith('x-account-meta-'):
-                    thread_manager.print_msg(
-                        '%10s: %s',
-                        'Meta %s' % key[len('x-account-meta-'):].title(),
-                        value)
-            for key, value in headers.items():
-                if not key.startswith('x-account-meta-') and key not in (
-                        'content-length', 'date', 'x-account-container-count',
-                        'x-account-object-count', 'x-account-bytes-used'):
-                    thread_manager.print_msg('%10s: %s', key.title(), value)
+            command_helpers.stat_account(conn, options, thread_manager)
         except ClientException as err:
             if err.http_status != 404:
                 raise
@@ -666,75 +638,15 @@ Containers: %d
                              'meant %r instead of %r.' % \
                              (args[0].replace('/', ' ', 1), args[0])
         try:
-            headers = conn.head_container(args[0])
-            object_count = prt_bytes(
-                headers.get('x-container-object-count', 0),
-                options.human).lstrip()
-            bytes_used = prt_bytes(headers.get('x-container-bytes-used', 0),
-                                   options.human).lstrip()
-            thread_manager.print_msg('''
-  Account: %s
-Container: %s
-  Objects: %s
-    Bytes: %s
- Read ACL: %s
-Write ACL: %s
-  Sync To: %s
- Sync Key: %s'''.strip('\n'), conn.url.rsplit('/', 1)[-1], args[0],
-                object_count, bytes_used,
-                headers.get('x-container-read', ''),
-                headers.get('x-container-write', ''),
-                headers.get('x-container-sync-to', ''),
-                headers.get('x-container-sync-key', ''))
-            for key, value in headers.items():
-                if key.startswith('x-container-meta-'):
-                    thread_manager.print_msg(
-                        '%9s: %s',
-                        'Meta %s' % key[len('x-container-meta-'):].title(),
-                        value)
-            for key, value in headers.items():
-                if not key.startswith('x-container-meta-') and key not in (
-                        'content-length', 'date', 'x-container-object-count',
-                        'x-container-bytes-used', 'x-container-read',
-                        'x-container-write', 'x-container-sync-to',
-                        'x-container-sync-key'):
-                    thread_manager.print_msg('%9s: %s', key.title(), value)
+            command_helpers.stat_container(conn, options, args,
+                                           thread_manager)
         except ClientException as err:
             if err.http_status != 404:
                 raise
             thread_manager.error('Container %r not found', args[0])
     elif len(args) == 2:
         try:
-            headers = conn.head_object(args[0], args[1])
-            thread_manager.print_msg('''
-       Account: %s
-     Container: %s
-        Object: %s
-  Content Type: %s'''.strip('\n'), conn.url.rsplit('/', 1)[-1], args[0],
-                args[1], headers.get('content-type'))
-            if 'content-length' in headers:
-                thread_manager.print_msg('Content Length: %s',
-                                         prt_bytes(headers['content-length'],
-                                                   options.human).lstrip())
-            if 'last-modified' in headers:
-                thread_manager.print_msg(' Last Modified: %s',
-                                         headers['last-modified'])
-            if 'etag' in headers:
-                thread_manager.print_msg('          ETag: %s', headers['etag'])
-            if 'x-object-manifest' in headers:
-                thread_manager.print_msg('      Manifest: %s',
-                                         headers['x-object-manifest'])
-            for key, value in headers.items():
-                if key.startswith('x-object-meta-'):
-                    thread_manager.print_msg(
-                        '%14s: %s',
-                        'Meta %s' % key[len('x-object-meta-'):].title(),
-                        value)
-            for key, value in headers.items():
-                if not key.startswith('x-object-meta-') and key not in (
-                        'content-type', 'content-length', 'last-modified',
-                        'etag', 'date', 'x-object-manifest'):
-                    thread_manager.print_msg('%14s: %s', key.title(), value)
+            command_helpers.stat_object(conn, options, args, thread_manager)
         except ClientException as err:
             if err.http_status != 404:
                 raise
@@ -747,7 +659,7 @@ Write ACL: %s
 st_post_options = '''[--read-acl <acl>] [--write-acl <acl>] [--sync-to]
                   [--sync-key <sync-key>] [--meta <name:value>]
                   [--header <header>]
-                  <container> <object>
+                  [container] [object]
 '''
 
 st_post_help = '''
@@ -755,8 +667,8 @@ Updates meta information for the account, container, or object.
 If the container is not found, it will be created automatically.
 
 Positional arguments:
-  <container>           Name of container to post to
-  <object>              Name of object to post. Specify multiple times
+  [container]           Name of container to post to
+  [object]              Name of object to post. Specify multiple times
                         for multiple objects
 
 Optional arguments:
@@ -807,6 +719,7 @@ def st_post(parser, args, thread_manager):
     if not args:
         headers = split_headers(
             options.meta, 'X-Account-Meta-', thread_manager)
+        headers.update(split_headers(options.header, '', thread_manager))
         try:
             conn.post_account(headers=headers)
         except ClientException as err:
@@ -820,6 +733,7 @@ def st_post(parser, args, thread_manager):
                              (args[0].replace('/', ' ', 1), args[0])
         headers = split_headers(options.meta, 'X-Container-Meta-',
                                 thread_manager)
+        headers.update(split_headers(options.header, '', thread_manager))
         if options.read_acl is not None:
             headers['X-Container-Read'] = options.read_acl
         if options.write_acl is not None:
@@ -852,6 +766,7 @@ st_upload_options = '''[--changed] [--segment-size <size>]
                     [--segment-container <container>] [--leave-segments]
                     [--object-threads <thread>] [--segment-threads <threads>]
                     [--header <header>] [--use-slo]
+                    [--object-name <object-name>]
                     <container> <file_or_directory>
 '''
 
@@ -888,6 +803,10 @@ Optional arguments:
   --use-slo             When used in conjunction with --segment-size will
                         create a Static Large Object instead of the default
                         Dynamic Large Object.
+  --object-name <object-name>
+                        Upload file and name object to <object-name> or upload
+                        dir and use <object-name> as object prefix instead of
+                        folder name
 '''.strip('\n')
 
 
@@ -928,6 +847,9 @@ def st_upload(parser, args, thread_manager):
         help='When used in conjunction with --segment-size will '
         'create a Static Large Object instead of the default '
         'Dynamic Large Object.')
+    parser.add_option(
+        '', '--object-name', dest='object_name',
+        help='Upload file and name object to the name specified')
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if len(args) < 2:
@@ -962,12 +884,17 @@ def st_upload(parser, args, thread_manager):
         path = job['path']
         container = job.get('container', args[0])
         dir_marker = job.get('dir_marker', False)
+        object_name = job['object_name']
         try:
-            obj = path
-            if obj.startswith('./') or obj.startswith('.\\'):
-                obj = obj[2:]
-            if obj.startswith('/'):
-                obj = obj[1:]
+            if object_name is not None:
+                object_name.replace("\\", "/")
+                obj = object_name
+            else:
+                obj = path
+                if obj.startswith('./') or obj.startswith('.\\'):
+                    obj = obj[2:]
+                if obj.startswith('/'):
+                    obj = obj[1:]
             put_headers = {'x-object-meta-mtime': "%f" % getmtime(path)}
             if dir_marker:
                 if options.changed:
@@ -1135,17 +1062,22 @@ def st_upload(parser, args, thread_manager):
                 raise
             thread_manager.error('Local file %r not found', path)
 
-    def _upload_dir(path, object_queue):
+    def _upload_dir(path, object_queue, object_name):
         names = listdir(path)
         if not names:
-            object_queue.put({'path': path, 'dir_marker': True})
+            object_queue.put({'path': path, 'object_name': object_name,
+                             'dir_marker': True})
         else:
             for name in listdir(path):
                 subpath = join(path, name)
+                subobjname = None
+                if object_name is not None:
+                    subobjname = join(object_name, name)
                 if isdir(subpath):
-                    _upload_dir(subpath, object_queue)
+                    _upload_dir(subpath, object_queue, subobjname)
                 else:
-                    object_queue.put({'path': subpath})
+                    object_queue.put({'path': subpath,
+                                     'object_name': subobjname})
 
     create_connection = lambda: get_conn(options)
     conn = create_connection()
@@ -1175,6 +1107,12 @@ def st_upload(parser, args, thread_manager):
             'Error trying to create container %r: %s', args[0],
             err)
 
+    if options.object_name is not None:
+        if len(args[1:]) > 1:
+            thread_manager.error('object-name only be used with 1 file or dir')
+            return
+    object_name = options.object_name
+
     object_manager = thread_manager.queue_manager(
         _object_job, options.object_threads,
         connection_maker=create_connection)
@@ -1182,13 +1120,48 @@ def st_upload(parser, args, thread_manager):
         try:
             for arg in args[1:]:
                 if isdir(arg):
-                    _upload_dir(arg, object_queue)
+                    _upload_dir(arg, object_queue, object_name)
                 else:
-                    object_queue.put({'path': arg})
+                    object_queue.put({'path': arg, 'object_name': object_name})
         except ClientException as err:
             if err.http_status != 404:
                 raise
             thread_manager.error('Account not found')
+
+
+st_capabilities_options = "[<proxy_url>]"
+st_capabilities_help = '''
+Retrieve capability of the proxy
+
+Optional positional arguments:
+  <proxy_url>           proxy URL of the cluster to retrieve capabilities
+'''
+
+
+def st_capabilities(parser, args, thread_manager):
+    def _print_compo_cap(name, capabilities):
+        for feature, options in sorted(capabilities.items(),
+                                       key=lambda x: x[0]):
+            thread_manager.print_msg("%s: %s" % (name, feature))
+            if options:
+                thread_manager.print_msg(" Options:")
+                for key, value in sorted(options.items(),
+                                         key=lambda x: x[0]):
+                    thread_manager.print_msg("  %s: %s" % (key, value))
+    (options, args) = parse_args(parser, args)
+    if (args and len(args) > 2):
+        thread_manager.error('Usage: %s capabilities %s\n%s',
+                             basename(argv[0]),
+                             st_capabilities_options, st_capabilities_help)
+        return
+    conn = get_conn(options)
+    url = None
+    if len(args) == 2:
+        url = args[1]
+    capabilities = conn.get_capabilities(url)
+    _print_compo_cap('Core', {'swift': capabilities['swift']})
+    del capabilities['swift']
+    _print_compo_cap('Additional middleware', capabilities)
 
 
 def split_headers(options, prefix='', thread_manager=None):
@@ -1243,6 +1216,9 @@ def parse_args(parser, args, enforce_requires=True):
         'region_name': options.os_region_name,
     }
 
+    if len(args) > 1 and args[0] == "capabilities":
+        return options, args
+
     if (options.os_options.get('object_storage_url') and
             options.os_options.get('auth_token') and
             options.auth_version == '2.0'):
@@ -1266,7 +1242,7 @@ if __name__ == '__main__':
     parser = OptionParser(version='%%prog %s' % version,
                           usage='''
 usage: %%prog [--version] [--help] [--snet] [--verbose]
-             [--debug] [--quiet] [--auth <auth_url>]
+             [--debug] [--info] [--quiet] [--auth <auth_url>]
              [--auth-version <auth_version>] [--user <username>]
              [--key <api_key>] [--retries <num_retries>]
              [--os-username <auth-user-name>] [--os-password <auth-password>]
@@ -1285,14 +1261,16 @@ Command-line interface to the OpenStack Swift API.
 Positional arguments:
   <subcommand>
     delete               Delete a container or objects within a container
-    downlad              Download objects from containers
+    download             Download objects from containers
     list                 Lists the containers for the account or the objects
                          for a container
     post                 Updates meta information for the account, container,
-                         or object
+                         or object; creates containers if not present
     stat                 Displays information for the account, container,
                          or object
     upload               Uploads files or directories to the given container
+    capabilities         List cluster capabilities
+
 
 Examples:
   %%prog -A https://auth.api.rackspacecloud.com/v1.0 -U user -K api_key stat -v
@@ -1311,8 +1289,11 @@ Examples:
     parser.add_option('-v', '--verbose', action='count', dest='verbose',
                       default=1, help='Print more info')
     parser.add_option('--debug', action='store_true', dest='debug',
-                      default=False, help='Show the curl commands of all http '
-                      'queries.')
+                      default=False, help='Show the curl commands and results '
+                      'of all http queries regardless of result status.')
+    parser.add_option('--info', action='store_true', dest='info',
+                      default=False, help='Show the curl commands and results '
+                      ' of all http queries which return an error.')
     parser.add_option('-q', '--quiet', action='store_const', dest='verbose',
                       const=0, default=1, help='Suppress status output')
     parser.add_option('-A', '--auth', dest='auth',
@@ -1335,13 +1316,13 @@ Examples:
     parser.add_option('--os-username',
                       metavar='<auth-user-name>',
                       default=environ.get('OS_USERNAME'),
-                      help='Openstack username. Defaults to env[OS_USERNAME].')
+                      help='OpenStack username. Defaults to env[OS_USERNAME].')
     parser.add_option('--os_username',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-password',
                       metavar='<auth-password>',
                       default=environ.get('OS_PASSWORD'),
-                      help='Openstack password. Defaults to env[OS_PASSWORD].')
+                      help='OpenStack password. Defaults to env[OS_PASSWORD].')
     parser.add_option('--os_password',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-tenant-id',
@@ -1354,20 +1335,20 @@ Examples:
     parser.add_option('--os-tenant-name',
                       metavar='<auth-tenant-name>',
                       default=environ.get('OS_TENANT_NAME'),
-                      help='Openstack tenant name. '
+                      help='OpenStack tenant name. '
                            'Defaults to env[OS_TENANT_NAME].')
     parser.add_option('--os_tenant_name',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-auth-url',
                       metavar='<auth-url>',
                       default=environ.get('OS_AUTH_URL'),
-                      help='Openstack auth URL. Defaults to env[OS_AUTH_URL].')
+                      help='OpenStack auth URL. Defaults to env[OS_AUTH_URL].')
     parser.add_option('--os_auth_url',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-auth-token',
                       metavar='<auth-token>',
                       default=environ.get('OS_AUTH_TOKEN'),
-                      help='Openstack token. Defaults to env[OS_AUTH_TOKEN]. '
+                      help='OpenStack token. Defaults to env[OS_AUTH_TOKEN]. '
                            'Used with --os-storage-url to bypass the '
                            'usual username/password authentication.')
     parser.add_option('--os_auth_token',
@@ -1375,7 +1356,7 @@ Examples:
     parser.add_option('--os-storage-url',
                       metavar='<storage-url>',
                       default=environ.get('OS_STORAGE_URL'),
-                      help='Openstack storage URL. '
+                      help='OpenStack storage URL. '
                            'Defaults to env[OS_STORAGE_URL]. '
                            'Overrides the storage url returned during auth. '
                            'Will bypass authentication when used with '
@@ -1385,21 +1366,21 @@ Examples:
     parser.add_option('--os-region-name',
                       metavar='<region-name>',
                       default=environ.get('OS_REGION_NAME'),
-                      help='Openstack region name. '
+                      help='OpenStack region name. '
                            'Defaults to env[OS_REGION_NAME]')
     parser.add_option('--os_region_name',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-service-type',
                       metavar='<service-type>',
                       default=environ.get('OS_SERVICE_TYPE'),
-                      help='Openstack Service type. '
+                      help='OpenStack Service type. '
                            'Defaults to env[OS_SERVICE_TYPE]')
     parser.add_option('--os_service_type',
                       help=SUPPRESS_HELP)
     parser.add_option('--os-endpoint-type',
                       metavar='<endpoint-type>',
                       default=environ.get('OS_ENDPOINT_TYPE'),
-                      help='Openstack Endpoint type. '
+                      help='OpenStack Endpoint type. '
                            'Defaults to env[OS_ENDPOINT_TYPE]')
     parser.add_option('--os-cacert',
                       metavar='<ca-certificate>',
@@ -1411,21 +1392,22 @@ Examples:
     parser.add_option('--insecure',
                       action="store_true", dest="insecure",
                       default=default_val,
-                      help='Allow swiftclient to access insecure keystone '
-                           'server. The keystone\'s certificate will not '
-                           'be verified. '
+                      help='Allow swiftclient to access servers without '
+                           'having to verify the SSL certificate. '
                            'Defaults to env[SWIFTCLIENT_INSECURE] '
                            '(set to \'true\' to enable).')
     parser.add_option('--no-ssl-compression',
                       action='store_false', dest='ssl_compression',
                       default=True,
-                      help='Disable SSL compression when using https. '
-                           'This may increase performance.')
+                      help='This option is deprecated and not used anymore. '
+                           'SSL compression should be disabled by default '
+                           'by the system SSL library')
     parser.disable_interspersed_args()
     (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
     parser.enable_interspersed_args()
 
-    commands = ('delete', 'download', 'list', 'post', 'stat', 'upload')
+    commands = ('delete', 'download', 'list', 'post',
+                'stat', 'upload', 'capabilities')
     if not args or args[0] not in commands:
         parser.print_usage()
         if args:
@@ -1434,9 +1416,12 @@ Examples:
 
     signal.signal(signal.SIGINT, immediate_exit)
 
-    if options.debug:
+    if options.debug or options.info:
         logger = logging.getLogger("swiftclient")
-        logging.basicConfig(level=logging.DEBUG)
+        if options.debug:
+            logging.basicConfig(level=logging.DEBUG)
+        elif options.info:
+            logging.basicConfig(level=logging.INFO)
 
     had_error = False
 
@@ -1444,7 +1429,7 @@ Examples:
         parser.usage = globals()['st_%s_help' % args[0]]
         try:
             globals()['st_%s' % args[0]](parser, argv[1:], thread_manager)
-        except (ClientException, HTTPException, socket.error) as err:
+        except (ClientException, RequestException, socket.error) as err:
             thread_manager.error(str(err))
 
         had_error = thread_manager.error_count

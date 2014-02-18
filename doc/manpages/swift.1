@@ -48,7 +48,7 @@ as well.
 Lists the containers for the account or the objects for a container.
 The -p or --prefix is an option that will only list items beginning
 with that prefix. The -d or --delimiter is option (for container listings only)
-that will roll up items with the given delimiter (see Cloud Files general
+that will roll up items with the given delimiter (see OpenStack Swift general
 documentation for what this means).
 
 The -l and --lh options provide more detail, similar to ls -l and ls -lh, the latter
@@ -61,7 +61,9 @@ of container or objects being listed.
 .RS 4
 Uploads to the given container the files and directories specified by the
 remaining args. The -c or --changed is an option that will only upload files
-that have changed since the last upload. The -S <size> or --segment-size <size>
+that have changed since the last upload. The --object-name <object-name> is
+an option that will upload file and name object to <object-name> or upload dir
+and use <object-name> as object prefix. The -S <size> or --segment-size <size>
 and --leave-segments are options as well (see --help for more).
 .RE
 
@@ -82,17 +84,25 @@ Downloads everything in the account (with --all), or everything in a
 container, or a list of objects depending on the args given. For a single
 object download, you may use the -o [--output] <filename> option to
 redirect the output to a specific file or if "-" then just redirect to stdout.
+You can specify optional headers with the repeatable cURL-like option
+-H [--header].
 .RE
 
 \fBdelete\fR [\fIcommand-options\fR] [\fIcontainer\fR] [\fIobject\fR] [\fIobject\fR] [...]
-
 .RS 4
 Deletes everything in the account (with --all), or everything in a container,
 or a list of objects depending on the args given. Segments of manifest objects
 will be deleted as well, unless you specify the --leave-segments option.
-
 .RE
 
+\fBcapabilities\fR [\fIproxy-url\fR]
+.RS 4
+Displays cluster capabilities. The output includes the list of the activated
+Swift middlewares as well as relevant options for each ones. Addtionaly the
+command displays relevant options for the Swift core. If the proxy-url option
+is not provided the storage-url retreived after authentication is used as
+proxy-url.
+.RE
 
 .SH OPTIONS
 .PD 0

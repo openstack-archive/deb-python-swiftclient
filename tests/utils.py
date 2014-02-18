@@ -12,7 +12,7 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from httplib import HTTPException
+from requests import RequestException
 from time import sleep
 
 
@@ -56,6 +56,16 @@ def fake_http_connect(*code_iter, **kwargs):
             self.etag = etag
             self.body = body
             self.timestamp = timestamp
+            self._is_closed = True
+
+        def connect(self):
+            self._is_closed = False
+
+        def close(self):
+            self._is_closed = True
+
+        def isclosed(self):
+            return self._is_closed
 
         def getresponse(self):
             if kwargs.get('raise_exc'):
@@ -64,7 +74,7 @@ def fake_http_connect(*code_iter, **kwargs):
 
         def getexpect(self):
             if self.status == -2:
-                raise HTTPException()
+                raise RequestException()
             if self.status == -3:
                 return FakeConn(507)
             return FakeConn(100)
@@ -90,6 +100,10 @@ def fake_http_connect(*code_iter, **kwargs):
                 headers['content-length'] = '4'
             if 'headers' in kwargs:
                 headers.update(kwargs['headers'])
+            if 'auth_v1' in kwargs:
+                headers.update(
+                    {'x-storage-url': 'storageURL',
+                     'x-auth-token': 'someauthtoken'})
             return headers.items()
 
         def read(self, amt=None):
@@ -131,8 +145,10 @@ def fake_http_connect(*code_iter, **kwargs):
         etag = etag_iter.next()
         timestamp = timestamps_iter.next()
         if status <= 0:
-            raise HTTPException()
-        return FakeConn(status, etag, body=kwargs.get('body', ''),
-                        timestamp=timestamp)
+            raise RequestException()
+        fake_conn = FakeConn(status, etag, body=kwargs.get('body', ''),
+                             timestamp=timestamp)
+        fake_conn.connect()
+        return fake_conn
 
     return connect
