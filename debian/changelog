@@ -3,6 +3,7 @@ python-swiftclient (1:2.0.2-1) unstable; urgency=high
   * New upstream release (Closes: #730626).
   * Reviewed build-dependency for the new upstream release.
   * Standards-Version: is now 3.9.5.
+  * Also builds the sphinx doc.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 18 Feb 2014 11:03:09 +0800
 
