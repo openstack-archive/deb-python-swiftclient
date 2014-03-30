@@ -1,2 +1,2 @@
 version=3
-http://tarballs.openstack.org/python-swiftclient/ python-swiftclient-(.*).tar.gz
+https://github.com/openstack/python-swiftclient/tags .*/(\d[\d\.]+)\.tar\.gz
