@@ -14,18 +14,26 @@
 # limitations under the License.
 
 # TODO: More tests
-import mock
 import logging
+
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
+import six
 import socket
-import StringIO
+import types
 import testtools
 import warnings
-from urlparse import urlparse
+from six.moves.urllib.parse import urlparse
+from six.moves import reload_module
 
 # TODO: mock http connection class with more control over headers
-from .utils import fake_http_connect, fake_get_keystoneclient_2_0
+from .utils import fake_http_connect, fake_get_auth_keystone
 
 from swiftclient import client as c
+import swiftclient.utils
 
 
 class TestClientException(testtools.TestCase):
@@ -62,14 +70,14 @@ class TestJsonImport(testtools.TestCase):
         except ImportError:
             pass
         else:
-            reload(json)
+            reload_module(json)
 
         try:
             import simplejson
         except ImportError:
             pass
         else:
-            reload(simplejson)
+            reload_module(simplejson)
         super(TestJsonImport, self).tearDown()
 
     def test_any(self):
@@ -84,7 +92,7 @@ class TestJsonImport(testtools.TestCase):
             pass
         else:
             delattr(simplejson, 'loads')
-            reload(c)
+            reload_module(c)
 
         try:
             from json import loads
@@ -137,7 +145,7 @@ class MockHttpTest(testtools.TestCase):
 
     def tearDown(self):
         super(MockHttpTest, self).tearDown()
-        reload(c)
+        reload_module(c)
 
 
 class MockHttpResponse():
@@ -146,6 +154,7 @@ class MockHttpResponse():
         self.status_code = status
         self.reason = "OK"
         self.buffer = []
+        self.requests_params = None
 
         class Raw:
             def read():
@@ -166,20 +175,25 @@ class MockHttpResponse():
 
     def _fake_request(self, *arg, **kwarg):
         self.status = 200
+        self.requests_params = kwarg
         # This simulate previous httplib implementation that would do a
         # putrequest() and then use putheader() to send header.
-        for k, v in kwarg['headers'].iteritems():
-            self.buffer.append('%s: %s' % (k, v))
+        for k, v in kwarg['headers'].items():
+            self.buffer.append((k, v))
         return self.fake_response()
 
 
 class TestHttpHelpers(MockHttpTest):
 
     def test_quote(self):
-        value = 'standard string'
-        self.assertEqual('standard%20string', c.quote(value))
-        value = u'\u0075nicode string'
+        value = b'bytes\xff'
+        self.assertEqual('bytes%FF', c.quote(value))
+        value = 'native string'
+        self.assertEqual('native%20string', c.quote(value))
+        value = u'unicode string'
         self.assertEqual('unicode%20string', c.quote(value))
+        value = u'unicode:\xe9\u20ac'
+        self.assertEqual('unicode%3A%C3%A9%E2%82%AC', c.quote(value))
 
     def test_http_connection(self):
         url = 'http://www.test.com'
@@ -191,22 +205,47 @@ class TestHttpHelpers(MockHttpTest):
         url = 'ftp://www.test.com'
         self.assertRaises(c.ClientException, c.http_connection, url)
 
-    def test_validate_headers(self):
-        headers = {'key': 'value'}
-        self.assertEqual(c.validate_headers(headers), None)
+    def test_set_user_agent_default(self):
+        _junk, conn = c.http_connection('http://www.example.com')
+        req_headers = {}
 
-        headers = {'key': 'value1\nvalue2'}
-        self.assertRaises(c.InvalidHeadersException, c.validate_headers,
-                          headers)
+        def my_request_handler(*a, **kw):
+            req_headers.update(kw.get('headers', {}))
+        conn._request = my_request_handler
 
-        headers = {'key': 'value1\rvalue2'}
-        self.assertRaises(c.InvalidHeadersException, c.validate_headers,
-                          headers)
+        # test the default
+        conn.request('GET', '/')
+        ua = req_headers.get('user-agent', 'XXX-MISSING-XXX')
+        self.assertTrue(ua.startswith('python-swiftclient-'))
 
-    def test_validate_headers_with_other_than_str(self):
-        for t in (None, 1, 1.0, 1L, u"A"):
-            self.assertEqual(c.validate_headers({'key': t}),
-                             None)
+    def test_set_user_agent_per_request_override(self):
+        _junk, conn = c.http_connection('http://www.example.com')
+        req_headers = {}
+
+        def my_request_handler(*a, **kw):
+            req_headers.update(kw.get('headers', {}))
+        conn._request = my_request_handler
+
+        # test if it's actually set
+        conn.request('GET', '/', headers={'User-Agent': 'Me'})
+        ua = req_headers.get('user-agent', 'XXX-MISSING-XXX')
+        self.assertEqual(ua, b'Me', req_headers)
+
+    def test_set_user_agent_default_override(self):
+        _junk, conn = c.http_connection(
+            'http://www.example.com',
+            default_user_agent='a-new-default')
+        req_headers = {}
+
+        def my_request_handler(*a, **kw):
+            req_headers.update(kw.get('headers', {}))
+        conn._request = my_request_handler
+
+        # test setting a default
+        conn._request = my_request_handler
+        conn.request('GET', '/')
+        ua = req_headers.get('user-agent', 'XXX-MISSING-XXX')
+        self.assertEqual(ua, 'a-new-default')
 
 # TODO: following tests are placeholders, need more tests, better coverage
 
@@ -246,25 +285,69 @@ class TestGetAuth(MockHttpTest):
                           'asdf', 'asdf',
                           auth_version='1.0')
 
-    def test_auth_v2(self):
+    def test_auth_v2_with_tenant_name(self):
         os_options = {'tenant_name': 'asdf'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
+        req_args = {'auth_version': '2.0'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
                                 auth_version="2.0")
         self.assertTrue(url.startswith("http"))
         self.assertTrue(token)
 
-    def test_auth_v2_no_tenant_name(self):
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0({})
+    def test_auth_v2_with_tenant_id(self):
+        os_options = {'tenant_id': 'asdf'}
+        req_args = {'auth_version': '2.0'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
+        url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                                os_options=os_options,
+                                auth_version="2.0")
+        self.assertTrue(url.startswith("http"))
+        self.assertTrue(token)
+
+    def test_auth_v2_with_project_name(self):
+        os_options = {'project_name': 'asdf'}
+        req_args = {'auth_version': '2.0'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
+        url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                                os_options=os_options,
+                                auth_version="2.0")
+        self.assertTrue(url.startswith("http"))
+        self.assertTrue(token)
+
+    def test_auth_v2_with_project_id(self):
+        os_options = {'project_id': 'asdf'}
+        req_args = {'auth_version': '2.0'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
+        url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                                os_options=os_options,
+                                auth_version="2.0")
+        self.assertTrue(url.startswith("http"))
+        self.assertTrue(token)
+
+    def test_auth_v2_no_tenant_name_or_tenant_id(self):
+        c.get_auth_keystone = fake_get_auth_keystone({})
         self.assertRaises(c.ClientException, c.get_auth,
                           'http://www.tests.com', 'asdf', 'asdf',
                           os_options={},
                           auth_version='2.0')
 
+    def test_auth_v2_with_tenant_name_none_and_tenant_id_none(self):
+        os_options = {'tenant_name': None,
+                      'tenant_id': None}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options)
+        self.assertRaises(c.ClientException, c.get_auth,
+                          'http://www.tests.com', 'asdf', 'asdf',
+                          os_options=os_options,
+                          auth_version='2.0')
+
     def test_auth_v2_with_tenant_user_in_user(self):
         tenant_option = {'tenant_name': 'foo'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(tenant_option)
+        c.get_auth_keystone = fake_get_auth_keystone(tenant_option)
         url, token = c.get_auth('http://www.test.com', 'foo:bar', 'asdf',
                                 os_options={},
                                 auth_version="2.0")
@@ -273,7 +356,7 @@ class TestGetAuth(MockHttpTest):
 
     def test_auth_v2_tenant_name_no_os_options(self):
         tenant_option = {'tenant_name': 'asdf'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(tenant_option)
+        c.get_auth_keystone = fake_get_auth_keystone(tenant_option)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 tenant_name='asdf',
                                 os_options={},
@@ -285,7 +368,7 @@ class TestGetAuth(MockHttpTest):
         os_options = {'service_type': 'object-store',
                       'endpoint_type': 'internalURL',
                       'tenant_name': 'asdf'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
+        c.get_auth_keystone = fake_get_auth_keystone(os_options)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
                                 auth_version="2.0")
@@ -294,7 +377,7 @@ class TestGetAuth(MockHttpTest):
 
     def test_auth_v2_with_tenant_user_in_user_no_os_options(self):
         tenant_option = {'tenant_name': 'foo'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(tenant_option)
+        c.get_auth_keystone = fake_get_auth_keystone(tenant_option)
         url, token = c.get_auth('http://www.test.com', 'foo:bar', 'asdf',
                                 auth_version="2.0")
         self.assertTrue(url.startswith("http"))
@@ -303,7 +386,7 @@ class TestGetAuth(MockHttpTest):
     def test_auth_v2_with_os_region_name(self):
         os_options = {'region_name': 'good-region',
                       'tenant_name': 'asdf'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(os_options)
+        c.get_auth_keystone = fake_get_auth_keystone(os_options)
         url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
                                 os_options=os_options,
                                 auth_version="2.0")
@@ -313,14 +396,14 @@ class TestGetAuth(MockHttpTest):
     def test_auth_v2_no_endpoint(self):
         os_options = {'region_name': 'unknown_region',
                       'tenant_name': 'asdf'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
+        c.get_auth_keystone = fake_get_auth_keystone(
             os_options, c.ClientException)
         self.assertRaises(c.ClientException, c.get_auth,
                           'http://www.tests.com', 'asdf', 'asdf',
                           os_options=os_options, auth_version='2.0')
 
     def test_auth_v2_ks_exception(self):
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
+        c.get_auth_keystone = fake_get_auth_keystone(
             {}, c.ClientException)
         self.assertRaises(c.ClientException, c.get_auth,
                           'http://www.tests.com', 'asdf', 'asdf',
@@ -329,7 +412,7 @@ class TestGetAuth(MockHttpTest):
 
     def test_auth_v2_cacert(self):
         os_options = {'tenant_name': 'foo'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
+        c.get_auth_keystone = fake_get_auth_keystone(
             os_options, None)
 
         auth_url_secure = 'https://www.tests.com'
@@ -357,7 +440,7 @@ class TestGetAuth(MockHttpTest):
 
     def test_auth_v2_insecure(self):
         os_options = {'tenant_name': 'foo'}
-        c.get_keystoneclient_2_0 = fake_get_keystoneclient_2_0(
+        c.get_auth_keystone = fake_get_auth_keystone(
             os_options, None)
 
         auth_url_secure = 'https://www.tests.com'
@@ -381,6 +464,29 @@ class TestGetAuth(MockHttpTest):
                           auth_url_insecure, 'asdf', 'asdf',
                           os_options=os_options, auth_version='2.0',
                           insecure=False)
+
+    def test_auth_v3_with_tenant_name(self):
+        # check the correct auth version is passed to get_auth_keystone
+        os_options = {'tenant_name': 'asdf'}
+        req_args = {'auth_version': '3'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
+        url, token = c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                                os_options=os_options,
+                                auth_version="3")
+        self.assertTrue(url.startswith("http"))
+        self.assertTrue(token)
+
+    def test_get_keystone_client_2_0(self):
+        # check the correct auth version is passed to get_auth_keystone
+        os_options = {'tenant_name': 'asdf'}
+        req_args = {'auth_version': '2.0'}
+        c.get_auth_keystone = fake_get_auth_keystone(os_options,
+                                                     required_kwargs=req_args)
+        url, token = c.get_keystoneclient_2_0('http://www.test.com', 'asdf',
+                                              'asdf', os_options=os_options)
+        self.assertTrue(url.startswith("http"))
+        self.assertTrue(token)
 
 
 class TestGetAccount(MockHttpTest):
@@ -572,31 +678,35 @@ class TestPutObject(MockHttpTest):
         c.http_connection = self.fake_http_connection(200)
         args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', 'asdf')
         value = c.put_object(*args)
-        self.assertTrue(isinstance(value, basestring))
+        self.assertTrue(isinstance(value, six.string_types))
 
     def test_unicode_ok(self):
         conn = c.http_connection(u'http://www.test.com/')
-        mock_file = StringIO.StringIO(u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91')
+        mock_file = six.StringIO(u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91')
         args = (u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 '\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 mock_file)
-        headers = {'X-Header1': u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
+        text = u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91'
+        headers = {'X-Header1': text,
                    'X-2': 1, 'X-3': {'a': 'b'}, 'a-b': '.x:yz mn:fg:lp'}
 
         resp = MockHttpResponse()
         conn[1].getresponse = resp.fake_response
         conn[1]._request = resp._fake_request
         value = c.put_object(*args, headers=headers, http_conn=conn)
-        self.assertTrue(isinstance(value, basestring))
+        self.assertTrue(isinstance(value, six.string_types))
         # Test for RFC-2616 encoded symbols
-        self.assertTrue("a-b: .x:yz mn:fg:lp" in resp.buffer[0],
-                        "[a-b: .x:yz mn:fg:lp] header is missing")
+        self.assertIn(("a-b", b".x:yz mn:fg:lp"),
+                      resp.buffer)
+        # Test unicode header
+        self.assertIn(('x-header1', text.encode('utf8')),
+                      resp.buffer)
 
     def test_chunk_warning(self):
         conn = c.http_connection('http://www.test.com/')
-        mock_file = StringIO.StringIO('asdf')
+        mock_file = six.StringIO('asdf')
         args = ('asdf', 'asdf', 'asdf', 'asdf', mock_file)
         resp = MockHttpResponse()
         conn[1].getresponse = resp.fake_response
@@ -629,6 +739,74 @@ class TestPutObject(MockHttpTest):
         c.put_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
                      query_string="hello=20")
 
+    def test_raw_upload(self):
+        # Raw upload happens when content_length is passed to put_object
+        conn = c.http_connection(u'http://www.test.com/')
+        resp = MockHttpResponse(status=200)
+        conn[1].getresponse = resp.fake_response
+        conn[1]._request = resp._fake_request
+        astring = 'asdf'
+        astring_len = len(astring)
+        mock_file = six.StringIO(astring)
+
+        c.put_object(url='http://www.test.com', http_conn=conn,
+                     contents=mock_file, content_length=astring_len)
+        self.assertTrue(isinstance(resp.requests_params['data'],
+                                   swiftclient.utils.LengthWrapper))
+        self.assertEqual(astring_len,
+                         len(resp.requests_params['data'].read()))
+
+        mock_file = six.StringIO(astring)
+        c.put_object(url='http://www.test.com', http_conn=conn,
+                     headers={'Content-Length': str(astring_len)},
+                     contents=mock_file)
+        self.assertTrue(isinstance(resp.requests_params['data'],
+                                   swiftclient.utils.LengthWrapper))
+        self.assertEqual(astring_len,
+                         len(resp.requests_params['data'].read()))
+
+    def test_chunk_upload(self):
+        # Chunked upload happens when no content_length is passed to put_object
+        conn = c.http_connection(u'http://www.test.com/')
+        resp = MockHttpResponse(status=200)
+        conn[1].getresponse = resp.fake_response
+        conn[1]._request = resp._fake_request
+        raw_data = 'asdf' * 256
+        chunk_size = 16
+        mock_file = six.StringIO(raw_data)
+
+        c.put_object(url='http://www.test.com', http_conn=conn,
+                     contents=mock_file, chunk_size=chunk_size)
+        request_data = resp.requests_params['data']
+        self.assertTrue(isinstance(request_data, types.GeneratorType))
+        data = ''
+        for chunk in request_data:
+            self.assertEqual(chunk_size, len(chunk))
+            data += chunk
+        self.assertEqual(data, raw_data)
+
+    def test_params(self):
+        conn = c.http_connection(u'http://www.test.com/')
+        resp = MockHttpResponse(status=200)
+        conn[1].getresponse = resp.fake_response
+        conn[1]._request = resp._fake_request
+
+        c.put_object(url='http://www.test.com', http_conn=conn,
+                     etag='1234-5678', content_type='text/plain')
+        request_header = resp.requests_params['headers']
+        self.assertEqual(request_header['etag'], b'1234-5678')
+        self.assertEqual(request_header['content-type'], b'text/plain')
+
+    def test_no_content_type(self):
+        conn = c.http_connection(u'http://www.test.com/')
+        resp = MockHttpResponse(status=200)
+        conn[1].getresponse = resp.fake_response
+        conn[1]._request = resp._fake_request
+
+        c.put_object(url='http://www.test.com', http_conn=conn)
+        request_header = resp.requests_params['headers']
+        self.assertEqual(request_header['content-type'], b'')
+
 
 class TestPostObject(MockHttpTest):
 
@@ -640,19 +818,30 @@ class TestPostObject(MockHttpTest):
     def test_unicode_ok(self):
         conn = c.http_connection(u'http://www.test.com/')
         args = (u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
-                '\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
+                u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
                 u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91')
-        headers = {'X-Header1': u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91',
-                   'X-2': '1', 'X-3': {'a': 'b'}, 'a-b': '.x:yz mn:kl:qr'}
+        text = u'\u5929\u7a7a\u4e2d\u7684\u4e4c\u4e91'
+        headers = {'X-Header1': text,
+                   b'X-Header2': 'value',
+                   'X-2': '1', 'X-3': {'a': 'b'}, 'a-b': '.x:yz mn:kl:qr',
+                   'X-Object-Meta-Header-not-encoded': text,
+                   b'X-Object-Meta-Header-encoded': 'value'}
 
         resp = MockHttpResponse()
         conn[1].getresponse = resp.fake_response
         conn[1]._request = resp._fake_request
         c.post_object(*args, headers=headers, http_conn=conn)
         # Test for RFC-2616 encoded symbols
-        self.assertTrue("a-b: .x:yz mn:kl:qr" in resp.buffer[0],
-                        "[a-b: .x:yz mn:kl:qr] header is missing")
+        self.assertIn(('a-b', b".x:yz mn:kl:qr"), resp.buffer)
+        # Test unicode header
+        self.assertIn(('x-header1', text.encode('utf8')),
+                      resp.buffer)
+        self.assertIn((b'x-object-meta-header-not-encoded',
+                      text.encode('utf8')), resp.buffer)
+        self.assertIn((b'x-object-meta-header-encoded', b'value'),
+                      resp.buffer)
+        self.assertIn((b'x-header2', b'value'), resp.buffer)
 
     def test_server_error(self):
         body = 'c' * 60
@@ -695,6 +884,30 @@ class TestGetCapabilities(MockHttpTest):
         conn = self.fake_http_connection(500)
         http_conn = conn('http://www.test.com/info')
         self.assertRaises(c.ClientException, c.get_capabilities, http_conn)
+
+
+class TestHTTPConnection(MockHttpTest):
+
+    def test_ok_proxy(self):
+        conn = c.http_connection(u'http://www.test.com/',
+                                 proxy='http://localhost:8080')
+        self.assertEqual(conn[1].requests_args['proxies']['http'],
+                         'http://localhost:8080')
+
+    def test_bad_proxy(self):
+        try:
+            c.http_connection(u'http://www.test.com/', proxy='localhost:8080')
+        except c.ClientException as e:
+            self.assertEqual(e.msg, "Proxy's missing scheme")
+
+    def test_cacert(self):
+        conn = c.http_connection(u'http://www.test.com/',
+                                 cacert='/dev/urandom')
+        self.assertEqual(conn[1].requests_args['verify'], '/dev/urandom')
+
+    def test_insecure(self):
+        conn = c.http_connection(u'http://www.test.com/', insecure=True)
+        self.assertEqual(conn[1].requests_args['verify'], False)
 
 
 class TestConnection(MockHttpTest):
@@ -969,7 +1182,7 @@ class TestLogging(MockHttpTest):
         c.http_connection = self.fake_http_connection(200)
         args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', 'asdf')
         value = c.put_object(*args)
-        self.assertTrue(isinstance(value, basestring))
+        self.assertTrue(isinstance(value, six.string_types))
 
     def test_head_error(self):
         c.http_connection = self.fake_http_connection(500)
@@ -1020,7 +1233,3 @@ class TestCloseConnection(MockHttpTest):
         conn.close()
         self.assertEqual(http_conn_obj.isclosed(), True)
         self.assertEqual(conn.http_conn, None)
-
-
-if __name__ == '__main__':
-    testtools.main()

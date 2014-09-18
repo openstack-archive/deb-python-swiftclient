@@ -15,6 +15,10 @@
 
 import testtools
 
+import mock
+import six
+import tempfile
+
 from swiftclient import utils as u
 
 
@@ -117,3 +121,79 @@ class TestPrtBytes(testtools.TestCase):
     def test_overflow(self):
         bytes_ = 2 ** 90
         self.assertEqual('1024Y', u.prt_bytes(bytes_, True).lstrip())
+
+
+class TestTempURL(testtools.TestCase):
+
+    def setUp(self):
+        super(TestTempURL, self).setUp()
+        self.url = '/v1/AUTH_account/c/o'
+        self.seconds = 3600
+        self.key = 'correcthorsebatterystaple'
+        self.method = 'GET'
+
+    @mock.patch('hmac.HMAC.hexdigest')
+    @mock.patch('time.time')
+    def test_generate_temp_url(self, time_mock, hmac_mock):
+        time_mock.return_value = 1400000000
+        hmac_mock.return_value = 'temp_url_signature'
+        expected_url = (
+            '/v1/AUTH_account/c/o?'
+            'temp_url_sig=temp_url_signature&'
+            'temp_url_expires=1400003600')
+        url = u.generate_temp_url(self.url, self.seconds, self.key,
+                                  self.method)
+        self.assertEqual(url, expected_url)
+
+    def test_generate_temp_url_bad_seconds(self):
+        self.assertRaises(TypeError,
+                          u.generate_temp_url,
+                          self.url,
+                          'not_an_int',
+                          self.key,
+                          self.method)
+
+        self.assertRaises(ValueError,
+                          u.generate_temp_url,
+                          self.url,
+                          -1,
+                          self.key,
+                          self.method)
+
+
+class TestLengthWrapper(testtools.TestCase):
+
+    def test_stringio(self):
+        contents = six.StringIO('a' * 100)
+        data = u.LengthWrapper(contents, 42)
+        self.assertEqual(42, len(data))
+        read_data = ''.join(iter(data.read, ''))
+        self.assertEqual(42, len(read_data))
+        self.assertEqual('a' * 42, read_data)
+
+    def test_tempfile(self):
+        with tempfile.NamedTemporaryFile(mode='w') as f:
+            f.write('a' * 100)
+            f.flush()
+            contents = open(f.name)
+            data = u.LengthWrapper(contents, 42)
+            self.assertEqual(42, len(data))
+            read_data = ''.join(iter(data.read, ''))
+            self.assertEqual(42, len(read_data))
+            self.assertEqual('a' * 42, read_data)
+
+    def test_segmented_file(self):
+        with tempfile.NamedTemporaryFile(mode='w') as f:
+            segment_length = 1024
+            segments = ('a', 'b', 'c', 'd')
+            for c in segments:
+                f.write(c * segment_length)
+            f.flush()
+            for i, c in enumerate(segments):
+                contents = open(f.name)
+                contents.seek(i * segment_length)
+                data = u.LengthWrapper(contents, segment_length)
+                self.assertEqual(segment_length, len(data))
+                read_data = ''.join(iter(data.read, ''))
+                self.assertEqual(segment_length, len(read_data))
+                self.assertEqual(c * segment_length, read_data)

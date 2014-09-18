@@ -16,11 +16,11 @@ from requests import RequestException
 from time import sleep
 
 
-def fake_get_keystoneclient_2_0(os_options, exc=None, **kwargs):
-    def fake_get_keystoneclient_2_0(auth_url,
-                                    user,
-                                    key,
-                                    actual_os_options, **actual_kwargs):
+def fake_get_auth_keystone(os_options, exc=None, **kwargs):
+    def fake_get_auth_keystone(auth_url,
+                               user,
+                               key,
+                               actual_os_options, **actual_kwargs):
         if exc:
             raise exc('test')
         if actual_os_options != os_options:
@@ -37,9 +37,13 @@ def fake_get_keystoneclient_2_0(os_options, exc=None, **kwargs):
            actual_kwargs['cacert'] is None:
             from swiftclient import client as c
             raise c.ClientException("unverified-certificate")
+        if 'required_kwargs' in kwargs:
+            for k, v in kwargs['required_kwargs'].items():
+                if v != actual_kwargs.get(k):
+                    return "", None
 
         return "http://url/", "token"
-    return fake_get_keystoneclient_2_0
+    return fake_get_auth_keystone
 
 
 def fake_http_connect(*code_iter, **kwargs):
@@ -92,7 +96,7 @@ def fake_http_connect(*code_iter, **kwargs):
             if not self.timestamp:
                 del headers['x-timestamp']
             try:
-                if container_ts_iter.next() is False:
+                if next(container_ts_iter) is False:
                     headers['x-container-timestamp'] = '1'
             except StopIteration:
                 pass
@@ -141,9 +145,9 @@ def fake_http_connect(*code_iter, **kwargs):
                 kwargs['give_content_type']('')
         if 'give_connect' in kwargs:
             kwargs['give_connect'](*args, **ckwargs)
-        status = code_iter.next()
-        etag = etag_iter.next()
-        timestamp = timestamps_iter.next()
+        status = next(code_iter)
+        etag = next(etag_iter)
+        timestamp = next(timestamps_iter)
         if status <= 0:
             raise RequestException()
         fake_conn = FakeConn(status, etag, body=kwargs.get('body', ''),
