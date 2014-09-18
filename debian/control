@@ -24,7 +24,8 @@ Build-Depends-Indep: python-coverage (>= 3.6),
                      python-setuptools,
                      python-simplejson,
                      python-testtools (>= 0.9.34),
-                     testrepository (>= 0.0.18)
+                     testrepository (>= 0.0.18),
+                     subunit
 Standards-Version: 3.9.5
 Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git

@@ -7,6 +7,7 @@ python-swiftclient (1:2.3.0-1) experimental; urgency=medium
   * New upstream release.
   * Updated (build-)depends for this release.
   * Removed manpage patch applied upstream.
+  * Using testr and subunit correctly.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 18 Sep 2014 22:31:55 +0800
 
