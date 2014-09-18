@@ -1,8 +1,12 @@
-python-swiftclient (1:2.0.2-2) UNRELEASED; urgency=medium
+python-swiftclient (1:2.3.0-1) experimental; urgency=medium
 
+  [ Thomas Bechtold ]
   * debian/watch: Use github tags.
 
- -- Thomas Bechtold <toabctl@debian.org>  Sun, 30 Mar 2014 12:42:46 +0200
+  [ Thomas Goirand ]
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 18 Sep 2014 22:31:55 +0800
 
 python-swiftclient (1:2.0.2-1) unstable; urgency=high
 
