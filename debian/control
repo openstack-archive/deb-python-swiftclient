@@ -9,20 +9,22 @@ Uploaders: Julien Danjou <acid@debian.org>,
 Build-Depends: debhelper (>= 9),
                openstack-pkg-tools,
                python-all (>= 2.6.6-3~),
-               python-pbr
+               python-pbr,
+               python-sphinx (>= 1.1.2),
 Build-Depends-Indep: python-coverage (>= 3.6),
+                     python-concurrent.futures,
                      python-eventlet,
                      python-httplib2,
-                     python-keystoneclient (>= 1:0.4.2),
+                     python-keystoneclient (>= 1:0.7.0),
                      python-mock (>= 1.0),
                      python-nose,
                      python-nosexcover,
+                     python-oslosphinx,
                      python-requests (>= 1.1),
                      python-setuptools,
                      python-simplejson,
-                     python-sphinx (>= 1.1.2),
-                     python-testtools (>= 0.9.32),
-                     testrepository (>= 0.0.17)
+                     python-testtools (>= 0.9.34),
+                     testrepository (>= 0.0.18)
 Standards-Version: 3.9.5
 Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git
@@ -31,10 +33,11 @@ Homepage: https://github.com/openstack/python-swiftclient
 Package: python-swiftclient
 Architecture: all
 Pre-Depends: dpkg (>= 1.15.6~)
-Depends: python-d2to1 (>=0.2.10),
+Depends: python-concurrent.futures,
+         python-d2to1 (>=0.2.10),
          python-eventlet,
          python-httplib2,
-         python-keystoneclient (>= 1:0.4.2),
+         python-keystoneclient (>= 1:0.7.0),
          python-pbr,
          python-requests (>= 1.1),
          python-simplejson,
