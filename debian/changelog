@@ -2,6 +2,7 @@ python-swiftclient (1:2.3.1-1) unstable; urgency=medium
 
   * New upstream release.
   * Uploading to unstable.
+  * Standards-Version is now 3.9.6 (no change).
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 17 Oct 2014 23:52:32 +0800
 
