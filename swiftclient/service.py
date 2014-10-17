@@ -77,8 +77,10 @@ class SwiftError(Exception):
 
 
 def process_options(options):
-    if not (options['auth'] and options['user'] and options['key']):
-        # Use 2.0 auth if none of the old args are present
+    if (not (options.get('auth') and options.get('user')
+             and options.get('key'))
+            and options.get('auth_version') != '3'):
+        # Use keystone 2.0 auth if any of the old-style args are missing
         options['auth_version'] = '2.0'
 
     # Use new-style args if old ones not present
@@ -91,8 +93,15 @@ def process_options(options):
 
     # Specific OpenStack options
     options['os_options'] = {
+        'user_id': options['os_user_id'],
+        'user_domain_id': options['os_user_domain_id'],
+        'user_domain_name': options['os_user_domain_name'],
         'tenant_id': options['os_tenant_id'],
         'tenant_name': options['os_tenant_name'],
+        'project_id': options['os_project_id'],
+        'project_name': options['os_project_name'],
+        'project_domain_id': options['os_project_domain_id'],
+        'project_domain_name': options['os_project_domain_name'],
         'service_type': options['os_service_type'],
         'endpoint_type': options['os_endpoint_type'],
         'auth_token': options['os_auth_token'],
@@ -111,9 +120,16 @@ _default_global_options = {
     "key": environ.get('ST_KEY'),
     "retries": 5,
     "os_username": environ.get('OS_USERNAME'),
+    "os_user_id": environ.get('OS_USER_ID'),
+    "os_user_domain_name": environ.get('OS_USER_DOMAIN_NAME'),
+    "os_user_domain_id": environ.get('OS_USER_DOMAIN_ID'),
     "os_password": environ.get('OS_PASSWORD'),
     "os_tenant_id": environ.get('OS_TENANT_ID'),
     "os_tenant_name": environ.get('OS_TENANT_NAME'),
+    "os_project_name": environ.get('OS_PROJECT_NAME'),
+    "os_project_id": environ.get('OS_PROJECT_ID'),
+    "os_project_domain_name": environ.get('OS_PROJECT_DOMAIN_NAME'),
+    "os_project_domain_id": environ.get('OS_PROJECT_DOMAIN_ID'),
     "os_auth_url": environ.get('OS_AUTH_URL'),
     "os_auth_token": environ.get('OS_AUTH_TOKEN'),
     "os_storage_url": environ.get('OS_STORAGE_URL'),
@@ -1003,18 +1019,18 @@ class SwiftService(object):
                 fp = None
                 try:
                     no_file = options['no_download']
-                    make_dir = not no_file and out_file != "-"
                     content_type = headers.get('content-type')
                     if content_type.split(';', 1)[0] == 'text/directory':
+                        make_dir = not no_file and out_file != "-"
                         if make_dir and not isdir(path):
                             mkdirs(path)
 
-                        for _ in obj_body.buffer():
-                            continue
                     else:
-                        dirpath = dirname(path)
-                        if make_dir and dirpath and not isdir(dirpath):
-                            mkdirs(dirpath)
+                        make_dir = not (no_file or out_file)
+                        if make_dir:
+                            dirpath = dirname(path)
+                            if dirpath and not isdir(dirpath):
+                                mkdirs(dirpath)
 
                         if not no_file:
                             if out_file == "-":
@@ -1023,30 +1039,25 @@ class SwiftService(object):
                                     'contents': obj_body
                                 }
                                 return res
-                            elif out_file:
+                            if out_file:
                                 fp = open(out_file, 'wb')
                             else:
                                 if basename(path):
                                     fp = open(path, 'wb')
                                 else:
                                     pseudodir = True
-                                    no_file = True
 
-                            for chunk in obj_body.buffer():
-                                if not no_file:
-                                    fp.write(chunk)
-
-                        else:
-                            for _ in obj_body.buffer():
-                                continue
+                    for chunk in obj_body.buffer():
+                        if fp is not None:
+                            fp.write(chunk)
 
                     finish_time = time()
+
                 finally:
                     bytes_read = obj_body.bytes_read()
                     if fp is not None:
                         fp.close()
-                        if 'x-object-meta-mtime' in headers \
-                                and not options['no_download']:
+                        if 'x-object-meta-mtime' in headers and not no_file:
                             mtime = float(headers['x-object-meta-mtime'])
                             if options['out_file'] \
                                     and not options['out_file'] == "-":
@@ -1903,7 +1914,6 @@ class SwiftService(object):
                         raise part["error"]
 
                     for seg in seg_list:
-                        print(seg)
                         del_seg = segment_pool.submit(
                             self._delete_segment, s_container,
                             seg, results_queue=results_queue
