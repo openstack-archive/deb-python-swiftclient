@@ -1,5 +1,6 @@
-python-swiftclient (1:2.3.0-2) unstable; urgency=medium
+python-swiftclient (1:2.3.1-1) unstable; urgency=medium
 
+  * New upstream release.
   * Uploading to unstable.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 17 Oct 2014 23:52:32 +0800
