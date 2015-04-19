@@ -67,24 +67,36 @@ class OutputManager(object):
         self.error_print_pool.__exit__(exc_type, exc_value, traceback)
         self.print_pool.__exit__(exc_type, exc_value, traceback)
 
+    def print_raw(self, data):
+        self.print_pool.submit(self._write, data, self.print_stream)
+
+    def _write(self, data, stream):
+        if six.PY3:
+            stream.buffer.write(data)
+            stream.flush()
+        if six.PY2:
+            stream.write(data)
+            stream.flush()
+
     def print_msg(self, msg, *fmt_args):
         if fmt_args:
             msg = msg % fmt_args
         self.print_pool.submit(self._print, msg)
 
     def print_items(self, items, offset=DEFAULT_OFFSET, skip_missing=False):
-        lines = []
         template = '%%%ds: %%s' % offset
         for k, v in items:
             if skip_missing and not v:
                 continue
-            lines.append((template % (k, v)).rstrip())
-        self.print_msg('\n'.join(lines))
+            self.print_msg((template % (k, v)).rstrip())
 
     def error(self, msg, *fmt_args):
         if fmt_args:
             msg = msg % fmt_args
         self.error_print_pool.submit(self._print_error, msg)
+
+    def get_error_count(self):
+        return self.error_count
 
     def _print(self, item, stream=None):
         if stream is None:
@@ -93,9 +105,15 @@ class OutputManager(object):
             item = item.encode('utf8')
         print(item, file=stream)
 
-    def _print_error(self, item):
-        self.error_count += 1
+    def _print_error(self, item, count=1):
+        self.error_count += count
         return self._print(item, stream=self.error_stream)
+
+    def warning(self, msg, *fmt_args):
+        # print to error stream but do not increment error count
+        if fmt_args:
+            msg = msg % fmt_args
+        self.error_print_pool.submit(self._print_error, msg, count=0)
 
 
 class MultiThreadingManager(object):

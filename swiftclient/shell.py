@@ -16,9 +16,9 @@
 
 from __future__ import print_function
 
+import logging
 import signal
 import socket
-import logging
 
 from optparse import OptionParser, OptionGroup, SUPPRESS_HELP
 from os import environ, walk, _exit as os_exit
@@ -118,34 +118,29 @@ def st_delete(parser, args, output_manager):
                     del_iter = swift.delete(container=container)
 
             for r in del_iter:
+                c = r.get('container', '')
+                o = r.get('object', '')
+                a = r.get('attempts')
+
                 if r['success']:
                     if options.verbose:
+                        a = ' [after {0} attempts]'.format(a) if a > 1 else ''
+
                         if r['action'] == 'delete_object':
-                            c = r['container']
-                            o = r['object']
-                            p = '%s/%s' % (c, o) if options.yes_all else o
-                            a = r['attempts']
-                            if a > 1:
-                                output_manager.print_msg(
-                                    '%s [after %d attempts]', p, a)
+                            if options.yes_all:
+                                p = '{0}/{1}'.format(c, o)
                             else:
-                                output_manager.print_msg(p)
-
+                                p = o
                         elif r['action'] == 'delete_segment':
-                            c = r['container']
-                            o = r['object']
-                            p = '%s/%s' % (c, o)
-                            a = r['attempts']
-                            if a > 1:
-                                output_manager.print_msg(
-                                    '%s [after %d attempts]', p, a)
-                            else:
-                                output_manager.print_msg(p)
+                            p = '{0}/{1}'.format(c, o)
+                        elif r['action'] == 'delete_container':
+                            p = c
 
+                        output_manager.print_msg('{0}{1}'.format(p, a))
                 else:
-                    # Special case error prints
-                    output_manager.error("An unexpected error occurred whilst "
-                                         "deleting: %s" % r['error'])
+                    p = '{0}/{1}'.format(c, o) if o else c
+                    output_manager.error('Error Deleting: {0}: {1}'
+                                         .format(p, r['error']))
         except SwiftError as err:
             output_manager.error(err.value)
 
@@ -266,8 +261,9 @@ def st_download(parser, args, output_manager):
 
             for down in down_iter:
                 if options.out_file == '-' and 'contents' in down:
-                    for chunk in down['contents']:
-                        output_manager.print_msg(chunk)
+                    contents = down['contents']
+                    for chunk in contents:
+                        output_manager.print_raw(chunk)
                 else:
                     if down['success']:
                         if options.verbose:
@@ -354,6 +350,57 @@ Optional arguments:
 
 
 def st_list(parser, args, output_manager):
+
+    def _print_stats(options, stats):
+        total_count = total_bytes = 0
+        container = stats.get("container", None)
+        for item in stats["listing"]:
+            item_name = item.get('name')
+            if not options.long and not options.human:
+                output_manager.print_msg(item.get('name', item.get('subdir')))
+            else:
+                if not container:    # listing containers
+                    item_bytes = item.get('bytes')
+                    byte_str = prt_bytes(item_bytes, options.human)
+                    count = item.get('count')
+                    total_count += count
+                    try:
+                        meta = item.get('meta')
+                        utc = gmtime(float(meta.get('x-timestamp')))
+                        datestamp = strftime('%Y-%m-%d %H:%M:%S', utc)
+                    except TypeError:
+                        datestamp = '????-??-?? ??:??:??'
+                    if not options.totals:
+                        output_manager.print_msg(
+                            "%5s %s %s %s", count, byte_str,
+                            datestamp, item_name)
+                else:    # list container contents
+                    subdir = item.get('subdir')
+                    if subdir is None:
+                        item_bytes = item.get('bytes')
+                        byte_str = prt_bytes(item_bytes, options.human)
+                        date, xtime = item.get('last_modified').split('T')
+                        xtime = xtime.split('.')[0]
+                    else:
+                        item_bytes = 0
+                        byte_str = prt_bytes(item_bytes, options.human)
+                        date = xtime = ''
+                        item_name = subdir
+                    if not options.totals:
+                        output_manager.print_msg(
+                            "%s %10s %8s %s", byte_str, date, xtime, item_name)
+                total_bytes += item_bytes
+
+        # report totals
+        if options.long or options.human:
+            if not container:
+                output_manager.print_msg(
+                    "%5s %s", prt_bytes(total_count, True),
+                    prt_bytes(total_bytes, options.human))
+            else:
+                output_manager.print_msg(
+                    prt_bytes(total_bytes, options.human))
+
     parser.add_option(
         '-l', '--long', dest='long', action='store_true', default=False,
         help='Long listing format, similar to ls -l.')
@@ -383,6 +430,11 @@ def st_list(parser, args, output_manager):
         _opts.pop('human')
         _opts['long'] = True
 
+    if options.totals and not options.long and not options.human:
+        output_manager.error(
+            "Listing totals only works with -l or --lh.")
+        return
+
     with SwiftService(options=_opts) as swift:
         try:
             if not args:
@@ -399,61 +451,8 @@ def st_list(parser, args, output_manager):
                     stats_parts_gen = swift.list(container=container)
 
             for stats in stats_parts_gen:
-                total_count = total_bytes = 0
-                container = stats.get("container", None)
                 if stats["success"]:
-                    for item in stats["listing"]:
-                        item_name = item.get('name')
-
-                        if not options.long and not options.human:
-                            output_manager.print_msg(
-                                item.get('name', item.get('subdir')))
-                        else:
-                            item_bytes = item.get('bytes')
-                            total_bytes += item_bytes
-                            if not container:    # listing containers
-                                byte_str = prt_bytes(item_bytes, options.human)
-                                count = item.get('count')
-                                total_count += count
-                                try:
-                                    meta = item.get('meta')
-                                    utc = gmtime(
-                                        float(meta.get('x-timestamp')))
-                                    datestamp = strftime(
-                                        '%Y-%m-%d %H:%M:%S', utc)
-                                except ClientException:
-                                    datestamp = '????-??-?? ??:??:??'
-                                if not options.totals:
-                                    output_manager.print_msg(
-                                        "%5s %s %s %s", count, byte_str,
-                                        datestamp, item_name)
-                            else:    # list container contents
-                                subdir = item.get('subdir')
-                                if subdir is None:
-                                    byte_str = prt_bytes(
-                                        item_bytes, options.human)
-                                    date, xtime = item.get(
-                                        'last_modified').split('T')
-                                    xtime = xtime.split('.')[0]
-                                else:
-                                    byte_str = prt_bytes(0, options.human)
-                                    date = xtime = ''
-                                    item_name = subdir
-                                if not options.totals:
-                                    output_manager.print_msg(
-                                        "%s %10s %8s %s", byte_str, date,
-                                        xtime, item_name)
-
-                    # report totals
-                    if options.long or options.human:
-                        if not container:
-                            output_manager.print_msg(
-                                "%5s %s", prt_bytes(total_count, True),
-                                prt_bytes(total_bytes, options.human))
-                        else:
-                            output_manager.print_msg(
-                                prt_bytes(total_bytes, options.human))
-
+                    _print_stats(options, stats)
                 else:
                     raise stats["error"]
 
@@ -488,13 +487,15 @@ def st_stat(parser, args, output_manager):
     _opts = vars(options)
 
     with SwiftService(options=_opts) as swift:
-        if not args:
-            stat_result = swift.stat()
-            items = stat_result['items']
-            headers = stat_result['headers']
-            print_account_stats(items, headers, output_manager)
-        else:
-            try:
+        try:
+            if not args:
+                stat_result = swift.stat()
+                if not stat_result['success']:
+                    raise stat_result['error']
+                items = stat_result['items']
+                headers = stat_result['headers']
+                print_account_stats(items, headers, output_manager)
+            else:
                 container = args[0]
                 if '/' in container:
                     output_manager.error(
@@ -505,6 +506,8 @@ def st_stat(parser, args, output_manager):
                 args = args[1:]
                 if not args:
                     stat_result = swift.stat(container=container)
+                    if not stat_result['success']:
+                        raise stat_result['error']
                     items = stat_result['items']
                     headers = stat_result['headers']
                     print_container_stats(items, headers, output_manager)
@@ -527,8 +530,8 @@ def st_stat(parser, args, output_manager):
                             'Usage: %s stat %s\n%s', BASENAME,
                             st_stat_options, st_stat_help)
 
-            except SwiftError as e:
-                output_manager.error(e.value)
+        except SwiftError as e:
+            output_manager.error(e.value)
 
 
 st_post_options = '''[--read-acl <acl>] [--write-acl <acl>] [--sync-to]
@@ -543,8 +546,7 @@ If the container is not found, it will be created automatically.
 
 Positional arguments:
   [container]           Name of container to post to.
-  [object]              Name of object to post. Specify multiple times
-                        for multiple objects.
+  [object]              Name of object to post.
 
 Optional arguments:
   --read-acl <acl>      Read ACL for containers. Quick summary of ACL syntax:
@@ -596,7 +598,7 @@ def st_post(parser, args, output_manager):
     with SwiftService(options=_opts) as swift:
         try:
             if not args:
-                swift.post()
+                result = swift.post()
             else:
                 container = args[0]
                 if '/' in container:
@@ -612,15 +614,16 @@ def st_post(parser, args, output_manager):
                         results_iterator = swift.post(
                             container=container, objects=objects
                         )
-                        for result in results_iterator:  # only 1 result
-                            if not result["success"]:
-                                raise(result["error"])
+                        result = next(results_iterator)
                     else:
                         output_manager.error(
                             'Usage: %s post %s\n%s', BASENAME,
                             st_post_options, st_post_help)
+                        return
                 else:
-                    swift.post(container=container)
+                    result = swift.post(container=container)
+            if not result["success"]:
+                raise(result["error"])
 
         except SwiftError as e:
             output_manager.error(e.value)
@@ -629,7 +632,7 @@ def st_post(parser, args, output_manager):
 st_upload_options = '''[--changed] [--skip-identical] [--segment-size <size>]
                     [--segment-container <container>] [--leave-segments]
                     [--object-threads <thread>] [--segment-threads <threads>]
-                    [--header <header>] [--use-slo]
+                    [--header <header>] [--use-slo] [--ignore-checksum]
                     [--object-name <object-name>]
                     <container> <file_or_directory>
 '''
@@ -673,6 +676,7 @@ Optional arguments:
                         Upload file and name object to <object-name> or upload
                         dir and use <object-name> as object prefix instead of
                         folder name.
+  --ignore-checksum     Turn off checksum validation for uploads.
 '''.strip('\n')
 
 
@@ -689,7 +693,9 @@ def st_upload(parser, args, output_manager):
         '-S', '--segment-size', dest='segment_size', help='Upload files '
         'in segments no larger than <size> (in Bytes) and then create a '
         '"manifest" file that will download all the segments as if it were '
-        'the original file.')
+        'the original file. Sizes may also be expressed as bytes with the '
+        'B suffix, kilobytes with the K suffix, megabytes with the M suffix '
+        'or gigabytes with the G suffix.')
     parser.add_option(
         '-C', '--segment-container', dest='segment_container',
         help='Upload the segments into the specified container. '
@@ -723,6 +729,9 @@ def st_upload(parser, args, output_manager):
         '', '--object-name', dest='object_name',
         help='Upload file and name object to <object-name> or upload dir and '
         'use <object-name> as object prefix instead of folder name.')
+    parser.add_option(
+        '', '--ignore-checksum', dest='checksum', default=True,
+        action='store_false', help='Turn off checksum validation for uploads.')
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if len(args) < 2:
@@ -740,6 +749,20 @@ def st_upload(parser, args, output_manager):
             return
         else:
             orig_path = files[0]
+
+    if options.segment_size:
+        try:
+            # If segment size only has digits assume it is bytes
+            int(options.segment_size)
+        except ValueError:
+            try:
+                size_mod = "BKMG".index(options.segment_size[-1].upper())
+                multiplier = int(options.segment_size[:-1])
+            except ValueError:
+                output_manager.error("Invalid segment size")
+                return
+
+            options.segment_size = str((1024 ** size_mod) * multiplier)
 
     _opts = vars(options)
     _opts['object_uu_threads'] = options.object_threads
@@ -797,16 +820,14 @@ def st_upload(parser, args, output_manager):
                                 )
                 else:
                     error = r['error']
-                    if isinstance(error, SwiftError):
-                        output_manager.error("%s" % error)
-                    elif isinstance(error, ClientException):
-                        if r['action'] == "create_container":
-                            if 'X-Storage-Policy' in r['headers']:
-                                output_manager.error(
-                                    'Error trying to create container %s with '
-                                    'Storage Policy %s', container,
-                                    r['headers']['X-Storage-Policy'].strip()
-                                )
+                    if 'action' in r and r['action'] == "create_container":
+                        # it is not an error to be unable to create the
+                        # container so print a warning and carry on
+                        if isinstance(error, ClientException):
+                            if (r['headers'] and
+                                    'X-Storage-Policy' in r['headers']):
+                                msg = ' with Storage Policy %s' % \
+                                      r['headers']['X-Storage-Policy'].strip()
                             else:
                                 msg = ' '.join(str(x) for x in (
                                     error.http_status, error.http_reason)
@@ -815,23 +836,24 @@ def st_upload(parser, args, output_manager):
                                     if msg:
                                         msg += ': '
                                     msg += error.http_response_content[:60]
-                                output_manager.error(
-                                    'Error trying to create container %r: %s',
-                                    container, msg
-                                )
+                                msg = ': %s' % msg
                         else:
-                            output_manager.error("%s" % error)
+                            msg = ': %s' % error
+                        output_manager.warning(
+                            'Warning: failed to create container '
+                            '%r%s', container, msg
+                        )
                     else:
-                        if r['action'] == "create_container":
+                        output_manager.error("%s" % error)
+                        too_large = (isinstance(error, ClientException) and
+                                     error.http_status == 413)
+                        if too_large and options.verbose > 0:
                             output_manager.error(
-                                'Error trying to create container %r: %s',
-                                container, error
-                            )
-                        else:
-                            output_manager.error("%s" % error)
+                                "Consider using the --segment-size option "
+                                "to chunk the object")
 
         except SwiftError as e:
-            output_manager.error("%s" % e)
+            output_manager.error(e.value)
 
 
 st_capabilities_options = "[<proxy_url>]"
@@ -945,8 +967,8 @@ def parse_args(parser, args, enforce_requires=True):
 
     if (not (options.auth and options.user and options.key)
             and options.auth_version != '3'):
-            # Use keystone auth if any of the old-style args are missing
-            options.auth_version = '2.0'
+        # Use keystone auth if any of the old-style args are missing
+        options.auth_version = '2.0'
 
     # Use new-style args if old ones not present
     if not options.auth and options.os_auth_url:
@@ -1288,9 +1310,7 @@ Examples:
         except (ClientException, RequestException, socket.error) as err:
             output.error(str(err))
 
-        had_error = output.error_count > 0
-
-    if had_error:
+    if output.get_error_count() > 0:
         exit(1)
 
 

@@ -19,10 +19,12 @@ OpenStack Swift client library used internally
 
 import socket
 import requests
-import sys
 import logging
 import warnings
-import functools
+try:
+    from simplejson import loads as json_loads
+except ImportError:
+    from json import loads as json_loads
 
 from distutils.version import StrictVersion
 from requests.exceptions import RequestException, SSLError
@@ -33,11 +35,13 @@ import six
 
 from swiftclient import version as swiftclient_version
 from swiftclient.exceptions import ClientException
-from swiftclient.utils import LengthWrapper
+from swiftclient.utils import LengthWrapper, ReadableToIterable
 
 AUTH_VERSIONS_V1 = ('1.0', '1', 1)
 AUTH_VERSIONS_V2 = ('2.0', '2', 2)
 AUTH_VERSIONS_V3 = ('3.0', '3', 3)
+USER_METADATA_TYPE = tuple('x-%s-meta-' % type_ for type_ in
+                           ('container', 'account', 'object'))
 
 try:
     from logging import NullHandler
@@ -119,16 +123,22 @@ def encode_utf8(value):
     return value
 
 
-# look for a real json parser first
-try:
-    # simplejson is popular and pretty good
-    from simplejson import loads as json_loads
-except ImportError:
-    # 2.6 will have a json module in the stdlib
-    from json import loads as json_loads
+def encode_meta_headers(headers):
+    """Only encode metadata headers keys"""
+    ret = {}
+    for header, value in headers.items():
+        value = encode_utf8(value)
+        header = header.lower()
+
+        if (isinstance(header, six.string_types)
+                and header.startswith(USER_METADATA_TYPE)):
+            header = encode_utf8(header)
+
+        ret[header] = value
+    return ret
 
 
-class HTTPConnection:
+class HTTPConnection(object):
     def __init__(self, url, proxy=None, cacert=None, insecure=False,
                  ssl_compression=False, default_user_agent=None):
         """
@@ -184,27 +194,12 @@ class HTTPConnection:
         """ Final wrapper before requests call, to be patched in tests """
         return self.request_session.request(*arg, **kwarg)
 
-    def _encode_meta_headers(self, items):
-        """Only encode metadata headers keys"""
-        ret = {}
-        for header, value in items:
-            value = encode_utf8(value)
-            header = header.lower()
-            if isinstance(header, six.string_types):
-                for target_type in 'container', 'account', 'object':
-                    prefix = 'x-%s-meta-' % target_type
-                    if header.startswith(prefix):
-                        header = encode_utf8(header)
-                        break
-            ret[header] = value
-        return ret
-
     def request(self, method, full_path, data=None, headers=None, files=None):
         """ Encode url and header, then call requests.request """
         if headers is None:
             headers = {}
         else:
-            headers = self._encode_meta_headers(headers.items())
+            headers = encode_meta_headers(headers)
 
         # set a default User-Agent header if it wasn't passed in
         if 'user-agent' not in headers:
@@ -237,10 +232,22 @@ class HTTPConnection:
         def getheader(k, v=None):
             return old_getheader(k.lower(), v)
 
+        def releasing_read(*args, **kwargs):
+            kwargs['decode_content'] = True
+            chunk = self.resp.raw.read(*args, **kwargs)
+            if not chunk:
+                # NOTE(sigmavirus24): Release the connection back to the
+                # urllib3's connection pool. This will reduce the number of
+                # log messages seen in bug #1341777. This does not actually
+                # close a socket. It will also prevent people from being
+                # mislead as to the cause of a bug as in bug #1424732.
+                self.resp.close()
+            return chunk
+
         self.resp.getheaders = getheaders
         self.resp.getheader = getheader
-        self.resp.read = functools.partial(self.resp.raw.read,
-                                           decode_content=True)
+        self.resp.read = releasing_read
+
         return self.resp
 
 
@@ -251,8 +258,9 @@ def http_connection(*arg, **kwarg):
 
 
 def get_auth_1_0(url, user, key, snet, **kwargs):
+    cacert = kwargs.get('cacert', None)
     insecure = kwargs.get('insecure', False)
-    parsed, conn = http_connection(url, insecure=insecure)
+    parsed, conn = http_connection(url, cacert=cacert, insecure=insecure)
     method = 'GET'
     conn.request(method, parsed.path, '',
                  {'X-Auth-User': user, 'X-Auth-Key': key})
@@ -294,9 +302,11 @@ def _import_keystone_client(auth_version):
         else:
             from keystoneclient.v2_0 import client as ksclient
         from keystoneclient import exceptions
+        # prevent keystoneclient warning us that it has no log handlers
+        logging.getLogger('keystoneclient').addHandler(NullHandler())
         return ksclient, exceptions
     except ImportError:
-        sys.exit('''
+        raise ClientException('''
 Auth versions 2.0 and 3 require python-keystoneclient, install it or use Auth
 version 1.0 which requires ST_AUTH, ST_USER, and ST_KEY environment
 variables to be set or overridden with -A, -U, or -K.''')
@@ -334,8 +344,8 @@ def get_auth_keystone(auth_url, user, key, os_options, **kwargs):
     except exceptions.Unauthorized:
         msg = 'Unauthorized. Check username, password and tenant name/id.'
         if auth_version in AUTH_VERSIONS_V3:
-            msg = 'Unauthorized. Check username/id, password, ' \
-                  + 'tenant name/id and user/tenant domain name/id.'
+            msg = ('Unauthorized. Check username/id, password, '
+                   'tenant name/id and user/tenant domain name/id.')
         raise ClientException(msg)
     except exceptions.AuthorizationFailure as err:
         raise ClientException('Authorization Failure. %s' % err)
@@ -350,12 +360,21 @@ def get_auth_keystone(auth_url, user, key, os_options, **kwargs):
     except exceptions.EndpointNotFound:
         raise ClientException('Endpoint for %s not found - '
                               'have you specified a region?' % service_type)
-    return (endpoint, _ksclient.auth_token)
+    return endpoint, _ksclient.auth_token
 
 
 def get_auth(auth_url, user, key, **kwargs):
     """
     Get authentication/authorization credentials.
+
+    :kwarg auth_version: the api version of the supplied auth params
+    :kwarg os_options: a dict, the openstack idenity service options
+
+    :returns: a tuple, (storage_url, token)
+
+    N.B. if the optional os_options paramater includes an non-empty
+    'object_storage_url' key it will override the the default storage url
+    returned by the auth service.
 
     The snet parameter is used for Rackspace's ServiceNet internal network
     implementation. In this function, it simply adds *snet-* to the beginning
@@ -367,26 +386,20 @@ def get_auth(auth_url, user, key, **kwargs):
     os_options = kwargs.get('os_options', {})
 
     storage_url, token = None, None
+    cacert = kwargs.get('cacert', None)
     insecure = kwargs.get('insecure', False)
     if auth_version in AUTH_VERSIONS_V1:
         storage_url, token = get_auth_1_0(auth_url,
                                           user,
                                           key,
                                           kwargs.get('snet'),
+                                          cacert=cacert,
                                           insecure=insecure)
     elif auth_version in AUTH_VERSIONS_V2 + AUTH_VERSIONS_V3:
-        # We are allowing to specify a token/storage-url to re-use
-        # without having to re-authenticate.
-        if (os_options.get('object_storage_url') and
-                os_options.get('auth_token')):
-            return (os_options.get('object_storage_url'),
-                    os_options.get('auth_token'))
-
         # We are handling a special use case here where the user argument
         # specifies both the user name and tenant name in the form tenant:user
         if user and not kwargs.get('tenant_name') and ':' in user:
-            (os_options['tenant_name'],
-             user) = user.split(':')
+            os_options['tenant_name'], user = user.split(':')
 
         # We are allowing to have an tenant_name argument in get_auth
         # directly without having os_options
@@ -396,9 +409,10 @@ def get_auth(auth_url, user, key, **kwargs):
         if not (os_options.get('tenant_name') or os_options.get('tenant_id')
                 or os_options.get('project_name')
                 or os_options.get('project_id')):
-            raise ClientException('No tenant specified')
+            if auth_version in AUTH_VERSIONS_V2:
+                raise ClientException('No tenant specified')
+            raise ClientException('No project name or project id specified.')
 
-        cacert = kwargs.get('cacert', None)
         storage_url, token = get_auth_keystone(auth_url, user,
                                                key, os_options,
                                                cacert=cacert,
@@ -461,9 +475,8 @@ def get_account(url, token, marker=None, limit=None, prefix=None,
         listing = rv[1]
         while listing:
             marker = listing[-1]['name']
-            listing = \
-                get_account(url, token, marker, limit, prefix,
-                            end_marker, http_conn)[1]
+            listing = get_account(url, token, marker, limit, prefix,
+                                  end_marker, http_conn)[1]
             if listing:
                 rv[1].extend(listing)
         return rv
@@ -926,7 +939,8 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                       container name is expected to be part of the url
     :param name: object name to put; if None, the object name is expected to be
                  part of the url
-    :param contents: a string or a file like object to read object data from;
+    :param contents: a string, a file like object or an iterable
+                     to read object data from;
                      if None, a zero-byte put will be done
     :param content_length: value to send as content-length header; also limits
                            the amount read from contents; if None, it will be
@@ -980,27 +994,26 @@ def put_object(url, token=None, container=None, name=None, contents=None,
         headers['Content-Type'] = ''
     if not contents:
         headers['Content-Length'] = '0'
-    if hasattr(contents, 'read'):
+
+    if isinstance(contents, (ReadableToIterable, LengthWrapper)):
+        conn.putrequest(path, headers=headers, data=contents)
+    elif hasattr(contents, 'read'):
         if chunk_size is None:
             chunk_size = 65536
+
         if content_length is None:
-            def chunk_reader():
-                while True:
-                    data = contents.read(chunk_size)
-                    if not data:
-                        break
-                    yield data
-            conn.putrequest(path, headers=headers, data=chunk_reader())
+            data = ReadableToIterable(contents, chunk_size, md5=False)
         else:
-            # Fixes https://github.com/kennethreitz/requests/issues/1648
-            data = LengthWrapper(contents, content_length)
-            conn.putrequest(path, headers=headers, data=data)
+            data = LengthWrapper(contents, content_length, md5=False)
+
+        conn.putrequest(path, headers=headers, data=data)
     else:
         if chunk_size is not None:
-            warn_msg = '%s object has no \"read\" method, ignoring chunk_size'\
-                % type(contents).__name__
+            warn_msg = ('%s object has no "read" method, ignoring chunk_size'
+                        % type(contents).__name__)
             warnings.warn(warn_msg, stacklevel=2)
         conn.request('PUT', path, contents, headers)
+
     resp = conn.getresponse()
     body = resp.read()
     headers = {'X-Auth-Token': token}
@@ -1015,7 +1028,8 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                               http_status=resp.status, http_reason=resp.reason,
                               http_response_content=body)
 
-    return resp.getheader('etag', '').strip('"')
+    etag = resp.getheader('etag', '').strip('"')
+    return etag
 
 
 def post_object(url, token, container, name, headers, http_conn=None,
@@ -1176,8 +1190,6 @@ class Connection(object):
         self.key = key
         self.retries = retries
         self.http_conn = None
-        self.url = preauthurl
-        self.token = preauthtoken
         self.attempts = 0
         self.snet = snet
         self.starting_backoff = starting_backoff
@@ -1186,6 +1198,10 @@ class Connection(object):
         self.os_options = os_options or {}
         if tenant_name:
             self.os_options['tenant_name'] = tenant_name
+        if preauthurl:
+            self.os_options['object_storage_url'] = preauthurl
+        self.url = preauthurl or self.os_options.get('object_storage_url')
+        self.token = preauthtoken or self.os_options.get('auth_token')
         self.cacert = cacert
         self.insecure = insecure
         self.ssl_compression = ssl_compression
@@ -1193,10 +1209,12 @@ class Connection(object):
         self.retry_on_ratelimit = retry_on_ratelimit
 
     def close(self):
-        if self.http_conn and type(self.http_conn) is tuple\
-                and len(self.http_conn) > 1:
+        if (self.http_conn and isinstance(self.http_conn, tuple)
+                and len(self.http_conn) > 1):
             conn = self.http_conn[1]
             if hasattr(conn, 'close') and callable(conn.close):
+                # XXX: Our HTTPConnection object has no close, should be
+                # trying to close the requests.Session here?
                 conn.close()
                 self.http_conn = None
 
@@ -1208,14 +1226,14 @@ class Connection(object):
                         cacert=self.cacert,
                         insecure=self.insecure)
 
-    def http_connection(self):
-        return http_connection(self.url,
+    def http_connection(self, url=None):
+        return http_connection(url if url else self.url,
                                cacert=self.cacert,
                                insecure=self.insecure,
                                ssl_compression=self.ssl_compression)
 
     def _add_response_dict(self, target_dict, kwargs):
-        if target_dict is not None:
+        if target_dict is not None and 'response_dict' in kwargs:
             response_dict = kwargs['response_dict']
             if 'response_dicts' in target_dict:
                 target_dict['response_dicts'].append(response_dict)
@@ -1381,10 +1399,11 @@ class Connection(object):
                            response_dict=response_dict)
 
     def get_capabilities(self, url=None):
+        url = url or self.url
         if not url:
             url, _ = self.get_auth()
         scheme = urlparse(url).scheme
         netloc = urlparse(url).netloc
         url = scheme + '://' + netloc + '/info'
-        http_conn = http_connection(url, ssl_compression=self.ssl_compression)
+        http_conn = self.http_connection(url)
         return get_capabilities(http_conn)
