@@ -2,30 +2,25 @@ Source: python-swiftclient
 Section: python
 Priority: extra
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-Uploaders: Julien Danjou <acid@debian.org>,
-           Thomas Goirand <zigo@debian.org>,
-           Ghe Rivero <ghe.rivero@stackops.com>,
-           Mehdi Abaakouk <sileht@sileht.net>
+Uploaders: Thomas Goirand <zigo@debian.org>
 Build-Depends: debhelper (>= 9),
-               openstack-pkg-tools,
+               dh-python,
+               openstack-pkg-tools (>= 23~),
                python-all (>= 2.6.6-3~),
                python-pbr,
-               python-sphinx (>= 1.1.2),
-Build-Depends-Indep: python-coverage (>= 3.6),
-                     python-concurrent.futures,
-                     python-eventlet,
-                     python-httplib2,
-                     python-keystoneclient (>= 1:0.7.0),
-                     python-mock (>= 1.0),
-                     python-nose,
-                     python-nosexcover,
+               python-sphinx,
+Build-Depends-Indep: python-concurrent.futures,
+                     python-coverage,
+                     python-hacking,
+                     python-keystoneclient,
+                     python-mock,
                      python-oslosphinx,
-                     python-requests (>= 1.1),
-                     python-setuptools,
+                     python-requests,
                      python-simplejson,
-                     python-testtools (>= 0.9.34),
-                     testrepository (>= 0.0.18),
-                     subunit
+                     python-six,
+                     python-testtools,
+                     subunit,
+                     testrepository,
 Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git
@@ -33,18 +28,13 @@ Homepage: https://github.com/openstack/python-swiftclient
 
 Package: python-swiftclient
 Architecture: all
-Pre-Depends: dpkg (>= 1.15.6~)
 Depends: python-concurrent.futures,
-         python-d2to1 (>=0.2.10),
-         python-eventlet,
-         python-httplib2,
-         python-keystoneclient (>= 1:0.7.0),
+         python-keystoneclient,
          python-pbr,
-         python-requests (>= 1.1),
+         python-requests,
          python-simplejson,
          ${misc:Depends},
-         ${python:Depends}
-Replaces: swift (<< 1.6.0)
+         ${python:Depends},
 Description: Client library for Openstack Swift API
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
