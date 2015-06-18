@@ -1,6 +1,7 @@
 python-swiftclient (1:2.4.0-1) experimental; urgency=medium
 
   * New upstream release.
+  * Fixed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Sun, 19 Apr 2015 19:12:15 +0200
 
