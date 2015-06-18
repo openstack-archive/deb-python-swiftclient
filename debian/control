@@ -2,7 +2,7 @@ Source: python-swiftclient
 Section: python
 Priority: extra
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-Uploaders: Thomas Goirand <zigo@debian.org>
+Uploaders: Thomas Goirand <zigo@debian.org>,
 Build-Depends: debhelper (>= 9),
                dh-python,
                openstack-pkg-tools,
@@ -10,6 +10,9 @@ Build-Depends: debhelper (>= 9),
                python-pbr,
                python-setuptools,
                python-sphinx,
+               python3-all,
+               python3-pbr,
+               python3-setuptools,
 Build-Depends-Indep: python-concurrent.futures,
                      python-coverage,
                      python-hacking,
@@ -20,6 +23,14 @@ Build-Depends-Indep: python-concurrent.futures,
                      python-simplejson,
                      python-six,
                      python-testtools,
+                     python3-hacking,
+                     python3-keystoneclient,
+                     python3-mock,
+                     python3-requests,
+                     python3-simplejson,
+                     python3-six,
+                     python3-subunit,
+                     python3-testtools,
                      subunit,
                      testrepository,
 Standards-Version: 3.9.6
@@ -37,7 +48,7 @@ Depends: python-concurrent.futures,
          python-six,
          ${misc:Depends},
          ${python:Depends},
-Description: Client library for Openstack Swift API
+Description: Client library for Openstack Swift API - Python 2.7
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
  accessible data. It is not a file system or real-time data storage system, but
@@ -59,3 +70,69 @@ Description: Client library for Openstack Swift API
  .
  This package provides a client for the OpenStack Swift API. There's a Python
  API  (the "swiftclient" module), and a command-line script ("swift").
+ .
+ This package contains the Python 2.7 module.
+
+Package: python3-swiftclient
+Architecture: all
+Depends: python3-keystoneclient,
+         python3-pbr,
+         python3-requests,
+         python3-simplejson,
+         python3-six,
+         ${misc:Depends},
+         ${python3:Depends},
+Description: Client library for Openstack Swift API - Python 3.x
+ OpenStack Object Storage (code-named Swift) creates redundant, scalable object
+ storage using clusters of standardized servers to store petabytes of
+ accessible data. It is not a file system or real-time data storage system, but
+ rather a long-term storage system for a more permanent type of static data
+ that can be retrieved, leveraged, and then updated if necessary. Primary
+ examples of data that best fit this type of storage model are virtual machine
+ images, photo storage, email storage and backup archiving. Having no central
+ "brain" or master point of control provides greater scalability, redundancy
+ and permanence.
+ .
+ Objects are written to multiple hardware devices in the data center, with
+ the OpenStack software responsible for ensuring data replication and
+ integrity across the cluster. Storage clusters can scale horizontally by
+ adding new nodes. Should a node fail, OpenStack works to replicate its
+ content from other active nodes. Because OpenStack uses software logic to
+ ensure data replication and distribution across different devices,
+ inexpensive commodity hard drives and servers can be used in lieu of more
+ expensive equipment.
+ .
+ This package provides a client for the OpenStack Swift API. There's a Python
+ API  (the "swiftclient" module), and a command-line script ("swift").
+ .
+ This package contains the Python 3.x module.
+
+Package: python-swiftclient-doc
+Section: doc
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+Description: Client library for Openstack Swift API - doc
+ OpenStack Object Storage (code-named Swift) creates redundant, scalable object
+ storage using clusters of standardized servers to store petabytes of
+ accessible data. It is not a file system or real-time data storage system, but
+ rather a long-term storage system for a more permanent type of static data
+ that can be retrieved, leveraged, and then updated if necessary. Primary
+ examples of data that best fit this type of storage model are virtual machine
+ images, photo storage, email storage and backup archiving. Having no central
+ "brain" or master point of control provides greater scalability, redundancy
+ and permanence.
+ .
+ Objects are written to multiple hardware devices in the data center, with
+ the OpenStack software responsible for ensuring data replication and
+ integrity across the cluster. Storage clusters can scale horizontally by
+ adding new nodes. Should a node fail, OpenStack works to replicate its
+ content from other active nodes. Because OpenStack uses software logic to
+ ensure data replication and distribution across different devices,
+ inexpensive commodity hard drives and servers can be used in lieu of more
+ expensive equipment.
+ .
+ This package provides a client for the OpenStack Swift API. There's a Python
+ API  (the "swiftclient" module), and a command-line script ("swift").
+ .
+ This package contains the documentation.

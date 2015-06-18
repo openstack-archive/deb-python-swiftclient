@@ -1,9 +1,0 @@
-Document: python-swiftclient
-Title: Swift Client Documentation
-Author: OpenStack
-Abstract: Sphinx documentation for Swift Client
-Section: Programming/Python
-
-Format: HTML
-Index: /usr/share/doc/python-swiftclient/html/index.html
-Files: /usr/share/doc/python-swiftclient/html/*

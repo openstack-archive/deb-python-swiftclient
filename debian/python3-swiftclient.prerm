@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -e
+
+if [ "$1" = "remove" ] ; then
+	update-alternatives --remove swift /usr/bin/python3-swift
+fi
+
+#DEBHELPER#
+
+exit 0
