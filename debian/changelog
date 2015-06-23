@@ -1,3 +1,9 @@
+python-swiftclient (1:2.3.1-2) UNRELEASED; urgency=medium
+
+  * Added missing python-pkg-resources depends (Closes: #789685).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 23 Jun 2015 21:14:19 +0000
+
 python-swiftclient (1:2.3.1-1) unstable; urgency=medium
 
   * New upstream release.
