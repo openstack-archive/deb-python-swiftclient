@@ -1,3 +1,9 @@
+python-swiftclient (1:2.4.0-2) experimental; urgency=medium
+
+  * Added dependency on python-pkg-resources (Closes: #789685).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 23 Jun 2015 23:02:54 +0200
+
 python-swiftclient (1:2.4.0-1) experimental; urgency=medium
 
   * New upstream release.
