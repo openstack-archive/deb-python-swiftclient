@@ -114,6 +114,8 @@ Section: doc
 Architecture: all
 Depends: ${misc:Depends},
          ${python3:Depends},
+Breaks: python-swiftclient (<< 1:2.4.0-2~)
+Replaces: python-swiftclient (<< 1:2.4.0-2~)
 Description: Client library for Openstack Swift API - doc
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
