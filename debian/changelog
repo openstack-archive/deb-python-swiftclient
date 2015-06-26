@@ -1,4 +1,4 @@
-python-swiftclient (1:2.4.0-3) UNRELEASED; urgency=medium
+python-swiftclient (1:2.4.0-3) experimental; urgency=medium
 
   * Added Breaks: + Replaces: of python-swiftclient in python-swiftclient-doc
     because the -doc package now contains the swift man page (Closes: #789668).
