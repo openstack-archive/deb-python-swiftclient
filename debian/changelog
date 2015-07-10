@@ -1,9 +1,10 @@
-python-swiftclient (1:2.4.0-4) UNRELEASED; urgency=medium
+python-swiftclient (1:2.4.0-4) experimental; urgency=medium
 
+  * Team upload.
   * d/p/multithreading-fixes.patch: Cherry pick fixes related to py3
     unit test failures from upstream VCS.
 
- -- James Page <james.page@ubuntu.com>  Fri, 10 Jul 2015 09:13:06 +0100
+ -- James Page <james.page@ubuntu.com>  Fri, 10 Jul 2015 09:17:01 +0100
 
 python-swiftclient (1:2.4.0-3) experimental; urgency=medium
 
