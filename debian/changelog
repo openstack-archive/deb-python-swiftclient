@@ -1,3 +1,10 @@
+python-swiftclient (1:2.4.0-5) experimental; urgency=medium
+
+  * Team upload.
+  * d/control,d/tests: Add autopkgtests from Ubuntu. 
+
+ -- James Page <james.page@ubuntu.com>  Wed, 15 Jul 2015 08:58:58 +0100
+
 python-swiftclient (1:2.4.0-4) experimental; urgency=medium
 
   * Team upload.
