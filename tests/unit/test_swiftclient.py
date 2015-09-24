@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import logging
-import json
 
 try:
     from unittest import mock
@@ -28,9 +27,9 @@ import warnings
 import tempfile
 from hashlib import md5
 from six.moves.urllib.parse import urlparse
-from six.moves import reload_module
 
-from .utils import MockHttpTest, fake_get_auth_keystone, StubResponse
+from .utils import (MockHttpTest, fake_get_auth_keystone, StubResponse,
+                    FakeKeystone, _make_fake_import_keystone_client)
 
 from swiftclient.utils import EMPTY_ETAG
 from swiftclient import client as c
@@ -64,36 +63,6 @@ class TestClientException(testtools.TestCase):
             self.assertTrue(value in str(exc))
 
 
-class TestJsonImport(testtools.TestCase):
-
-    def tearDown(self):
-        reload_module(json)
-
-        try:
-            import simplejson
-        except ImportError:
-            pass
-        else:
-            reload_module(simplejson)
-        super(TestJsonImport, self).tearDown()
-
-    def test_any(self):
-        self.assertTrue(hasattr(c, 'json_loads'))
-
-    def test_no_simplejson_falls_back_to_stdlib_when_reloaded(self):
-        # break simplejson
-        try:
-            import simplejson
-        except ImportError:
-            # not installed, so we don't have to break it for these tests
-            pass
-        else:
-            delattr(simplejson, 'loads')  # break simple json
-            reload_module(c)  # reload to repopulate json_loads
-
-        self.assertEqual(c.json_loads, json.loads)
-
-
 class MockHttpResponse(object):
     def __init__(self, status=0, headers=None, verify=False):
         self.status = status
@@ -106,20 +75,31 @@ class MockHttpResponse(object):
         self.headers = {'etag': '"%s"' % EMPTY_ETAG}
         if headers:
             self.headers.update(headers)
+        self.closed = False
 
         class Raw(object):
-            def read(self):
-                pass
-        self.raw = Raw()
+            def __init__(self, headers):
+                self.headers = headers
+
+            def read(self, **kw):
+                return ""
+
+            def getheader(self, name, default):
+                return self.headers.get(name, default)
+
+        self.raw = Raw(headers)
 
     def read(self):
         return ""
+
+    def close(self):
+        self.closed = True
 
     def getheader(self, name, default):
         return self.headers.get(name, default)
 
     def getheaders(self):
-        return {"key1": "value1", "key2": "value2"}
+        return dict(self.headers)
 
     def fake_response(self):
         return self
@@ -221,8 +201,6 @@ class TestHttpHelpers(MockHttpTest):
         ua = req_headers.get('user-agent', 'XXX-MISSING-XXX')
         self.assertEqual(ua, 'a-new-default')
 
-# TODO: following tests are placeholders, need more tests, better coverage
-
 
 class TestGetAuth(MockHttpTest):
 
@@ -259,6 +237,59 @@ class TestGetAuth(MockHttpTest):
         # TODO: this test is really on validating the mock and not the
         # the full plumbing into the requests's 'verify' option
         self.assertIn('invalid_certificate', str(e))
+
+    def test_auth_v1_timeout(self):
+        # this test has some overlap with
+        # TestConnection.test_timeout_passed_down but is required to check that
+        # get_auth does the right thing when it is not passed a timeout arg
+        orig_http_connection = c.http_connection
+        timeouts = []
+
+        def fake_request_handler(*a, **kw):
+            if 'timeout' in kw:
+                timeouts.append(kw['timeout'])
+            else:
+                timeouts.append(None)
+            return MockHttpResponse(
+                status=200,
+                headers={
+                    'x-auth-token': 'a_token',
+                    'x-storage-url': 'http://files.example.com/v1/AUTH_user'})
+
+        def fake_connection(*a, **kw):
+            url, conn = orig_http_connection(*a, **kw)
+            conn._request = fake_request_handler
+            return url, conn
+
+        with mock.patch('swiftclient.client.http_connection', fake_connection):
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       auth_version="1.0", timeout=42.0)
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       auth_version="1.0", timeout=None)
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       auth_version="1.0")
+
+        self.assertEqual(timeouts, [42.0, None, None])
+
+    def test_auth_v2_timeout(self):
+        # this test has some overlap with
+        # TestConnection.test_timeout_passed_down but is required to check that
+        # get_auth does the right thing when it is not passed a timeout arg
+        fake_ks = FakeKeystone(endpoint='http://some_url', token='secret')
+        with mock.patch('swiftclient.client._import_keystone_client',
+                        _make_fake_import_keystone_client(fake_ks)):
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       os_options=dict(tenant_name='tenant'),
+                       auth_version="2.0", timeout=42.0)
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       os_options=dict(tenant_name='tenant'),
+                       auth_version="2.0", timeout=None)
+            c.get_auth('http://www.test.com', 'asdf', 'asdf',
+                       os_options=dict(tenant_name='tenant'),
+                       auth_version="2.0")
+        self.assertEqual(3, len(fake_ks.calls))
+        timeouts = [call['timeout'] for call in fake_ks.calls]
+        self.assertEqual([42.0, None, None], timeouts)
 
     def test_auth_v2_with_tenant_name(self):
         os_options = {'tenant_name': 'asdf'}
@@ -655,6 +686,41 @@ class TestGetObject(MockHttpTest):
             }),
         ])
 
+    def test_chunk_size_read_method(self):
+        conn = c.Connection('http://auth.url/', 'some_user', 'some_key')
+        with mock.patch('swiftclient.client.get_auth_1_0') as mock_get_auth:
+            mock_get_auth.return_value = ('http://auth.url/', 'tToken')
+            c.http_connection = self.fake_http_connection(200, body='abcde')
+            __, resp = conn.get_object('asdf', 'asdf', resp_chunk_size=3)
+            self.assertTrue(hasattr(resp, 'read'))
+            self.assertEqual(resp.read(3), 'abc')
+            self.assertEqual(resp.read(None), 'de')
+            self.assertEqual(resp.read(), '')
+
+    def test_chunk_size_iter(self):
+        conn = c.Connection('http://auth.url/', 'some_user', 'some_key')
+        with mock.patch('swiftclient.client.get_auth_1_0') as mock_get_auth:
+            mock_get_auth.return_value = ('http://auth.url/', 'tToken')
+            c.http_connection = self.fake_http_connection(200, body='abcde')
+            __, resp = conn.get_object('asdf', 'asdf', resp_chunk_size=3)
+            self.assertTrue(hasattr(resp, 'next'))
+            self.assertEqual(next(resp), 'abc')
+            self.assertEqual(next(resp), 'de')
+            self.assertRaises(StopIteration, next, resp)
+
+    def test_chunk_size_read_and_iter(self):
+        conn = c.Connection('http://auth.url/', 'some_user', 'some_key')
+        with mock.patch('swiftclient.client.get_auth_1_0') as mock_get_auth:
+            mock_get_auth.return_value = ('http://auth.url/', 'tToken')
+            c.http_connection = self.fake_http_connection(200, body='abcdef')
+            __, resp = conn.get_object('asdf', 'asdf', resp_chunk_size=2)
+            self.assertTrue(hasattr(resp, 'read'))
+            self.assertEqual(resp.read(3), 'abc')
+            self.assertEqual(next(resp), 'de')
+            self.assertEqual(resp.read(), 'f')
+            self.assertRaises(StopIteration, next, resp)
+            self.assertEqual(resp.read(), '')
+
 
 class TestHeadObject(MockHttpTest):
 
@@ -805,9 +871,9 @@ class TestPutObject(MockHttpTest):
                                 contents=contents,
                                 chunk_size=chunk_size)
 
-            self.assertNotEquals(etag, contents.get_md5sum())
-            self.assertEquals(etag, 'badresponseetag')
-            self.assertEquals(raw_data_md5, contents.get_md5sum())
+            self.assertNotEqual(etag, contents.get_md5sum())
+            self.assertEqual(etag, 'badresponseetag')
+            self.assertEqual(raw_data_md5, contents.get_md5sum())
 
     def test_md5_match(self):
         conn = c.http_connection('http://www.test.com')
@@ -830,8 +896,8 @@ class TestPutObject(MockHttpTest):
                                 contents=contents,
                                 chunk_size=chunk_size)
 
-            self.assertEquals(raw_data_md5, contents.get_md5sum())
-            self.assertEquals(etag, contents.get_md5sum())
+            self.assertEqual(raw_data_md5, contents.get_md5sum())
+            self.assertEqual(etag, contents.get_md5sum())
 
     def test_params(self):
         conn = c.http_connection(u'http://www.test.com/')
@@ -925,7 +991,7 @@ class TestDeleteObject(MockHttpTest):
 class TestGetCapabilities(MockHttpTest):
 
     def test_ok(self):
-        conn = self.fake_http_connection(200, body='{}')
+        conn = self.fake_http_connection(200, body=b'{}')
         http_conn = conn('http://www.test.com/info')
         info = c.get_capabilities(http_conn)
         self.assertRequests([
@@ -946,7 +1012,7 @@ class TestGetCapabilities(MockHttpTest):
         }
         auth_v1_response = StubResponse(headers=auth_headers)
         stub_info = {'swift': {'fake': True}}
-        info_response = StubResponse(body=json.dumps(stub_info))
+        info_response = StubResponse(body=b'{"swift":{"fake":true}}')
         fake_conn = self.fake_http_connection(auth_v1_response, info_response)
 
         conn = c.Connection('http://auth.example.com/auth/v1.0',
@@ -964,7 +1030,7 @@ class TestGetCapabilities(MockHttpTest):
         fake_keystone = fake_get_auth_keystone(
             storage_url='http://storage.example.com/v1/AUTH_test')
         stub_info = {'swift': {'fake': True}}
-        info_response = StubResponse(body=json.dumps(stub_info))
+        info_response = StubResponse(body=b'{"swift":{"fake":true}}')
         fake_conn = self.fake_http_connection(info_response)
 
         os_options = {'project_id': 'test'}
@@ -982,7 +1048,7 @@ class TestGetCapabilities(MockHttpTest):
 
     def test_conn_get_capabilities_with_url_param(self):
         stub_info = {'swift': {'fake': True}}
-        info_response = StubResponse(body=json.dumps(stub_info))
+        info_response = StubResponse(body=b'{"swift":{"fake":true}}')
         fake_conn = self.fake_http_connection(info_response)
 
         conn = c.Connection('http://auth.example.com/auth/v1.0',
@@ -998,7 +1064,7 @@ class TestGetCapabilities(MockHttpTest):
 
     def test_conn_get_capabilities_with_preauthurl_param(self):
         stub_info = {'swift': {'fake': True}}
-        info_response = StubResponse(body=json.dumps(stub_info))
+        info_response = StubResponse(body=b'{"swift":{"fake":true}}')
         fake_conn = self.fake_http_connection(info_response)
 
         storage_url = 'http://storage.example.com/v1/AUTH_test'
@@ -1014,7 +1080,7 @@ class TestGetCapabilities(MockHttpTest):
 
     def test_conn_get_capabilities_with_os_options(self):
         stub_info = {'swift': {'fake': True}}
-        info_response = StubResponse(body=json.dumps(stub_info))
+        info_response = StubResponse(body=b'{"swift":{"fake":true}}')
         fake_conn = self.fake_http_connection(info_response)
 
         storage_url = 'http://storage.example.com/v1/AUTH_test'
@@ -1036,6 +1102,29 @@ class TestGetCapabilities(MockHttpTest):
 
 class TestHTTPConnection(MockHttpTest):
 
+    def test_bad_url_scheme(self):
+        url = u'www.test.com'
+        exc = self.assertRaises(c.ClientException, c.http_connection, url)
+        expected = u'Unsupported scheme "" in url "www.test.com"'
+        self.assertEqual(expected, str(exc))
+
+        url = u'://www.test.com'
+        exc = self.assertRaises(c.ClientException, c.http_connection, url)
+        expected = u'Unsupported scheme "" in url "://www.test.com"'
+        self.assertEqual(expected, str(exc))
+
+        url = u'blah://www.test.com'
+        exc = self.assertRaises(c.ClientException, c.http_connection, url)
+        expected = u'Unsupported scheme "blah" in url "blah://www.test.com"'
+        self.assertEqual(expected, str(exc))
+
+    def test_ok_url_scheme(self):
+        for scheme in ('http', 'https', 'HTTP', 'HTTPS'):
+            url = u'%s://www.test.com' % scheme
+            parsed_url, conn = c.http_connection(url)
+            self.assertEqual(scheme.lower(), parsed_url.scheme)
+            self.assertEqual(u'%s://www.test.com' % scheme, conn.url)
+
     def test_ok_proxy(self):
         conn = c.http_connection(u'http://www.test.com/',
                                  proxy='http://localhost:8080')
@@ -1056,6 +1145,17 @@ class TestHTTPConnection(MockHttpTest):
     def test_insecure(self):
         conn = c.http_connection(u'http://www.test.com/', insecure=True)
         self.assertEqual(conn[1].requests_args['verify'], False)
+
+    def test_response_connection_released(self):
+        _parsed_url, conn = c.http_connection(u'http://www.test.com/')
+        conn.resp = MockHttpResponse()
+        conn.resp.raw = mock.Mock()
+        conn.resp.raw.read.side_effect = ["Chunk", ""]
+        resp = conn.getresponse()
+        self.assertFalse(resp.closed)
+        self.assertEqual("Chunk", resp.read())
+        self.assertFalse(resp.read())
+        self.assertTrue(resp.closed)
 
 
 class TestConnection(MockHttpTest):
@@ -1131,7 +1231,7 @@ class TestConnection(MockHttpTest):
 
             for method, args in method_signatures:
                 c.http_connection = self.fake_http_connection(
-                    200, body='[]', storage_url=static_url)
+                    200, body=b'[]', storage_url=static_url)
                 method(*args)
                 self.assertEqual(len(self.request_log), 1)
                 for request in self.iter_request_log():
@@ -1233,7 +1333,7 @@ class TestConnection(MockHttpTest):
             # represenative of the unit under test.  The real get_auth
             # method will always return the os_option dict's
             # object_storage_url which will be overridden by the
-            # preauthurl paramater to Connection if it is provided.
+            # preauthurl parameter to Connection if it is provided.
             return 'http://www.new.com', 'new'
 
         def swap_sleep(*args):
@@ -1381,6 +1481,104 @@ class TestConnection(MockHttpTest):
             ('HEAD', '/v1/AUTH_pre_url', '', {'x-auth-token': 'post_token'}),
         ])
 
+    def test_preauth_url_trumps_os_preauth_url(self):
+        storage_url = 'http://storage.example.com/v1/AUTH_pre_url'
+        os_storage_url = 'http://storage.example.com/v1/AUTH_os_pre_url'
+        os_preauth_options = {
+            'tenant_name': 'demo',
+            'object_storage_url': os_storage_url,
+        }
+        orig_os_preauth_options = dict(os_preauth_options)
+        conn = c.Connection('http://auth.example.com', 'user', 'password',
+                            os_options=os_preauth_options, auth_version=2,
+                            preauthurl=storage_url, tenant_name='not_demo')
+        fake_keystone = fake_get_auth_keystone(
+            storage_url='http://storage.example.com/v1/AUTH_post_url',
+            token='post_token')
+        fake_conn = self.fake_http_connection(200)
+        with mock.patch.multiple('swiftclient.client',
+                                 get_auth_keystone=fake_keystone,
+                                 http_connection=fake_conn,
+                                 sleep=mock.DEFAULT):
+            conn.head_account()
+        self.assertRequests([
+            ('HEAD', '/v1/AUTH_pre_url', '', {'x-auth-token': 'post_token'}),
+        ])
+
+        # check that Connection has not modified our os_options
+        self.assertEqual(orig_os_preauth_options, os_preauth_options)
+
+    def test_get_auth_sets_url_and_token(self):
+        with mock.patch('swiftclient.client.get_auth') as mock_get_auth:
+            mock_get_auth.return_value = (
+                "https://storage.url/v1/AUTH_storage_acct", "AUTH_token"
+            )
+            conn = c.Connection("https://auth.url/auth/v2.0",
+                                "user", "passkey", tenant_name="tenant")
+            conn.get_auth()
+        self.assertEqual("https://storage.url/v1/AUTH_storage_acct", conn.url)
+        self.assertEqual("AUTH_token", conn.token)
+
+    def test_timeout_passed_down(self):
+        # We want to avoid mocking http_connection(), and most especially
+        # avoid passing it down in argument. However, we cannot simply
+        # instantiate C=Connection(), then shim C.http_conn. Doing so would
+        # avoid some of the code under test (where _retry() invokes
+        # http_connection()), and would miss get_auth() completely.
+        # So, with regret, we do mock http_connection(), but with a very
+        # light shim that swaps out _request() as originally intended.
+
+        orig_http_connection = c.http_connection
+
+        timeouts = []
+
+        def my_request_handler(*a, **kw):
+            if 'timeout' in kw:
+                timeouts.append(kw['timeout'])
+            else:
+                timeouts.append(None)
+            return MockHttpResponse(
+                status=200,
+                headers={
+                    'x-auth-token': 'a_token',
+                    'x-storage-url': 'http://files.example.com/v1/AUTH_user'})
+
+        def shim_connection(*a, **kw):
+            url, conn = orig_http_connection(*a, **kw)
+            conn._request = my_request_handler
+            return url, conn
+
+        # v1 auth
+        conn = c.Connection(
+            'http://auth.example.com', 'user', 'password', timeout=33.0)
+        with mock.patch.multiple('swiftclient.client',
+                                 http_connection=shim_connection,
+                                 sleep=mock.DEFAULT):
+            conn.head_account()
+
+        # 1 call is through get_auth, 1 call is HEAD for account
+        self.assertEqual(timeouts, [33.0, 33.0])
+
+        # v2 auth
+        timeouts = []
+        conn = c.Connection(
+            'http://auth.example.com', 'user', 'password', timeout=33.0,
+            os_options=dict(tenant_name='tenant'), auth_version=2.0)
+        fake_ks = FakeKeystone(endpoint='http://some_url', token='secret')
+        with mock.patch('swiftclient.client._import_keystone_client',
+                        _make_fake_import_keystone_client(fake_ks)):
+            with mock.patch.multiple('swiftclient.client',
+                                     http_connection=shim_connection,
+                                     sleep=mock.DEFAULT):
+                conn.head_account()
+
+        # check timeout is passed to keystone client
+        self.assertEqual(1, len(fake_ks.calls))
+        self.assertTrue('timeout' in fake_ks.calls[0])
+        self.assertEqual(33.0, fake_ks.calls[0].get('timeout'))
+        # check timeout passed to HEAD for account
+        self.assertEqual(timeouts, [33.0])
+
     def test_reset_stream(self):
 
         class LocalContents(object):
@@ -1441,7 +1639,8 @@ class TestConnection(MockHttpTest):
                 return ''
 
         def local_http_connection(url, proxy=None, cacert=None,
-                                  insecure=False, ssl_compression=True):
+                                  insecure=False, ssl_compression=True,
+                                  timeout=None):
             parsed = urlparse(url)
             return parsed, LocalConnection()
 
@@ -1634,3 +1833,308 @@ class TestCloseConnection(MockHttpTest):
         self.assertIsInstance(http_conn_obj, c.HTTPConnection)
         self.assertFalse(hasattr(http_conn_obj, 'close'))
         conn.close()
+
+
+class TestServiceToken(MockHttpTest):
+
+    def setUp(self):
+        super(TestServiceToken, self).setUp()
+        self.os_options = {
+            'object_storage_url': 'http://storage_url.com',
+            'service_username': 'service_username',
+            'service_project_name': 'service_project_name',
+            'service_key': 'service_key'}
+
+    def get_connection(self):
+        conn = c.Connection('http://www.test.com', 'asdf', 'asdf',
+                            os_options=self.os_options)
+
+        self.assertTrue(isinstance(conn, c.Connection))
+        conn.get_auth = self.get_auth
+        conn.get_service_auth = self.get_service_auth
+
+        self.assertEqual(conn.attempts, 0)
+        self.assertEqual(conn.service_token, None)
+
+        self.assertTrue(isinstance(conn, c.Connection))
+        return conn
+
+    def get_auth(self):
+        # The real get_auth function will always return the os_option
+        # dict's object_storage_url which will be overridden by the
+        # preauthurl paramater to Connection if it is provided.
+        return self.os_options.get('object_storage_url'), 'token'
+
+    def get_service_auth(self):
+        # The real get_auth function will always return the os_option
+        # dict's object_storage_url which will be overridden by the
+        # preauthurl parameter to Connection if it is provided.
+        return self.os_options.get('object_storage_url'), 'stoken'
+
+    def test_service_token_reauth(self):
+        get_auth_call_list = []
+
+        def get_auth(url, user, key, **kwargs):
+            # The real get_auth function will always return the os_option
+            # dict's object_storage_url which will be overridden by the
+            # preauthurl parameter to Connection if it is provided.
+            args = {'url': url, 'user': user, 'key': key, 'kwargs': kwargs}
+            get_auth_call_list.append(args)
+            return_dict = {'asdf': 'new', 'service_username': 'newserv'}
+            storage_url = kwargs['os_options'].get('object_storage_url')
+            return storage_url, return_dict[user]
+
+        def swap_sleep(*args):
+            self.swap_sleep_called = True
+            c.get_auth = get_auth
+
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(401, 200)):
+            with mock.patch('swiftclient.client.sleep', swap_sleep):
+                self.swap_sleep_called = False
+
+                conn = c.Connection('http://www.test.com', 'asdf', 'asdf',
+                                    preauthurl='http://www.old.com',
+                                    preauthtoken='old',
+                                    os_options=self.os_options)
+
+                self.assertEqual(conn.attempts, 0)
+                self.assertEqual(conn.url, 'http://www.old.com')
+                self.assertEqual(conn.token, 'old')
+
+                conn.head_account()
+
+        self.assertTrue(self.swap_sleep_called)
+        self.assertEqual(conn.attempts, 2)
+        # The original 'preauth' storage URL *must* be preserved
+        self.assertEqual(conn.url, 'http://www.old.com')
+        self.assertEqual(conn.token, 'new')
+        self.assertEqual(conn.service_token, 'newserv')
+
+        # Check get_auth was called with expected args
+        auth_args = get_auth_call_list[0]
+        auth_kwargs = get_auth_call_list[0]['kwargs']
+        self.assertEqual('asdf', auth_args['user'])
+        self.assertEqual('asdf', auth_args['key'])
+        self.assertEqual('service_key',
+                         auth_kwargs['os_options']['service_key'])
+        self.assertEqual('service_username',
+                         auth_kwargs['os_options']['service_username'])
+        self.assertEqual('service_project_name',
+                         auth_kwargs['os_options']['service_project_name'])
+
+        auth_args = get_auth_call_list[1]
+        auth_kwargs = get_auth_call_list[1]['kwargs']
+        self.assertEqual('service_username', auth_args['user'])
+        self.assertEqual('service_key', auth_args['key'])
+        self.assertEqual('service_project_name',
+                         auth_kwargs['os_options']['tenant_name'])
+
+    def test_service_token_get_account(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            with mock.patch('swiftclient.client.parse_api_response'):
+                conn = self.get_connection()
+                conn.get_account()
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('GET', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/?format=json',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_head_account(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.head_account()
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('HEAD', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com', actual['full_path'])
+
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_post_account(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(201)):
+            conn = self.get_connection()
+            conn.post_account(headers={})
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('POST', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com', actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_delete_container(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(204)):
+            conn = self.get_connection()
+            conn.delete_container('container1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('DELETE', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_get_container(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            with mock.patch('swiftclient.client.parse_api_response'):
+                conn = self.get_connection()
+                conn.get_container('container1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('GET', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1?format=json',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_head_container(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.head_container('container1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('HEAD', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_post_container(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(201)):
+            conn = self.get_connection()
+            conn.post_container('container1', {})
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('POST', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_put_container(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.put_container('container1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('PUT', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_get_object(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.get_object('container1', 'obj1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('GET', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1/obj1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_head_object(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.head_object('container1', 'obj1')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('HEAD', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1/obj1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_put_object(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            conn = self.get_connection()
+            conn.put_object('container1', 'obj1', 'a_string')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('PUT', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1/obj1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_post_object(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(202)):
+            conn = self.get_connection()
+            conn.post_object('container1', 'obj1', {})
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('POST', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1/obj1',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_service_token_delete_object(self):
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(202)):
+            conn = self.get_connection()
+            conn.delete_object('container1', 'obj1', 'a_string')
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        for actual in self.iter_request_log():
+            self.assertEqual('DELETE', actual['method'])
+            actual_hdrs = actual['headers']
+            self.assertTrue('X-Service-Token' in actual_hdrs)
+            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('token', actual_hdrs['X-Auth-Token'])
+            self.assertEqual('http://storage_url.com/container1/obj1?a_string',
+                             actual['full_path'])
+        self.assertEqual(conn.attempts, 1)

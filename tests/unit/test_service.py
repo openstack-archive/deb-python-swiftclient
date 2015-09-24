@@ -14,18 +14,24 @@
 # limitations under the License.
 import mock
 import os
+import six
 import tempfile
 import testtools
 import time
+
+from concurrent.futures import Future
 from hashlib import md5
 from mock import Mock, PropertyMock
 from six.moves.queue import Queue, Empty as QueueEmptyError
 from six import BytesIO
+from time import sleep
 
 import swiftclient
 import swiftclient.utils as utils
-from swiftclient.client import Connection
-from swiftclient.service import SwiftService, SwiftError
+from swiftclient.client import Connection, ClientException
+from swiftclient.service import (
+    SwiftService, SwiftError, SwiftUploadObject
+)
 
 
 clean_os_environ = {}
@@ -33,6 +39,12 @@ environ_prefixes = ('ST_', 'OS_')
 for key in os.environ:
     if any(key.startswith(m) for m in environ_prefixes):
         clean_os_environ[key] = ''
+
+
+if six.PY2:
+    import __builtin__ as builtins
+else:
+    import builtins
 
 
 class TestSwiftPostObject(testtools.TestCase):
@@ -138,25 +150,29 @@ class TestSwiftReader(testtools.TestCase):
                          '97ac82a5b825239e782d0339e2d7b910')
 
 
-class TestServiceDelete(testtools.TestCase):
-    def setUp(self):
-        super(TestServiceDelete, self).setUp()
-        self.opts = {'leave_segments': False, 'yes_all': False}
-        self.exc = Exception('test_exc')
-        # Base response to be copied and updated to matched the expected
-        # response for each test
-        self.expected = {
-            'action': None,   # Should be string in the form delete_XX
-            'container': 'test_c',
-            'object': 'test_o',
-            'attempts': 2,
-            'response_dict': {},
-            'success': None   # Should be a bool
-        }
+class _TestServiceBase(testtools.TestCase):
+    def _assertDictEqual(self, a, b, m=None):
+        # assertDictEqual is not available in py2.6 so use a shallow check
+        # instead
+        if not m:
+            m = '{0} != {1}'.format(a, b)
+
+        if hasattr(self, 'assertDictEqual'):
+            self.assertDictEqual(a, b, m)
+        else:
+            self.assertTrue(isinstance(a, dict),
+                            'First argument is not a dictionary')
+            self.assertTrue(isinstance(b, dict),
+                            'Second argument is not a dictionary')
+            self.assertEqual(len(a), len(b), m)
+            for k, v in a.items():
+                self.assertIn(k, b, m)
+                self.assertEqual(b[k], v, m)
 
     def _get_mock_connection(self, attempts=2):
         m = Mock(spec=Connection)
         type(m).attempts = PropertyMock(return_value=attempts)
+        type(m).auth_end_time = PropertyMock(return_value=4)
         return m
 
     def _get_queue(self, q):
@@ -174,18 +190,22 @@ class TestServiceDelete(testtools.TestCase):
 
         return expected
 
-    def _assertDictEqual(self, a, b, m=None):
-        # assertDictEqual is not available in py2.6 so use a shallow check
-        # instead
-        if hasattr(self, 'assertDictEqual'):
-            self.assertDictEqual(a, b, m)
-        else:
-            self.assertTrue(isinstance(a, dict))
-            self.assertTrue(isinstance(b, dict))
-            self.assertEqual(len(a), len(b), m)
-            for k, v in a.items():
-                self.assertTrue(k in b, m)
-                self.assertEqual(b[k], v, m)
+
+class TestServiceDelete(_TestServiceBase):
+    def setUp(self):
+        super(TestServiceDelete, self).setUp()
+        self.opts = {'leave_segments': False, 'yes_all': False}
+        self.exc = Exception('test_exc')
+        # Base response to be copied and updated to matched the expected
+        # response for each test
+        self.expected = {
+            'action': None,   # Should be string in the form delete_XX
+            'container': 'test_c',
+            'object': 'test_o',
+            'attempts': 2,
+            'response_dict': {},
+            'success': None   # Should be a bool
+        }
 
     def test_delete_segment(self):
         mock_q = Queue()
@@ -212,16 +232,23 @@ class TestServiceDelete(testtools.TestCase):
             'action': 'delete_segment',
             'object': 'test_s',
             'success': False,
-            'error': self.exc
+            'error': self.exc,
+            'traceback': mock.ANY,
+            'error_timestamp': mock.ANY
         })
 
+        before = time.time()
         r = SwiftService._delete_segment(mock_conn, 'test_c', 'test_s', mock_q)
+        after = time.time()
 
         mock_conn.delete_object.assert_called_once_with(
             'test_c', 'test_s', response_dict={}
         )
         self._assertDictEqual(expected_r, r)
         self._assertDictEqual(expected_r, self._get_queue(mock_q))
+        self.assertGreaterEqual(r['error_timestamp'], before)
+        self.assertLessEqual(r['error_timestamp'], after)
+        self.assertTrue('Traceback' in r['traceback'])
 
     def test_delete_object(self):
         mock_q = Queue()
@@ -248,20 +275,27 @@ class TestServiceDelete(testtools.TestCase):
         expected_r = self._get_expected({
             'action': 'delete_object',
             'success': False,
-            'error': self.exc
+            'error': self.exc,
+            'traceback': mock.ANY,
+            'error_timestamp': mock.ANY
         })
         # _delete_object doesnt populate attempts or response dict if it hits
         # an error. This may not be the correct behaviour.
         del expected_r['response_dict'], expected_r['attempts']
 
+        before = time.time()
         s = SwiftService()
         r = s._delete_object(mock_conn, 'test_c', 'test_o', self.opts, mock_q)
+        after = time.time()
 
         mock_conn.head_object.assert_called_once_with('test_c', 'test_o')
         mock_conn.delete_object.assert_called_once_with(
             'test_c', 'test_o', query_string=None, response_dict={}
         )
         self._assertDictEqual(expected_r, r)
+        self.assertGreaterEqual(r['error_timestamp'], before)
+        self.assertLessEqual(r['error_timestamp'], after)
+        self.assertTrue('Traceback' in r['traceback'])
 
     def test_delete_object_slo_support(self):
         # If SLO headers are present the delete call should include an
@@ -338,23 +372,30 @@ class TestServiceDelete(testtools.TestCase):
         )
         self._assertDictEqual(expected_r, r)
 
-    def test_delete_empty_container_excpetion(self):
+    def test_delete_empty_container_exception(self):
         mock_conn = self._get_mock_connection()
         mock_conn.delete_container = Mock(side_effect=self.exc)
         expected_r = self._get_expected({
             'action': 'delete_container',
             'success': False,
             'object': None,
-            'error': self.exc
+            'error': self.exc,
+            'traceback': mock.ANY,
+            'error_timestamp': mock.ANY
         })
 
+        before = time.time()
         s = SwiftService()
         r = s._delete_empty_container(mock_conn, 'test_c')
+        after = time.time()
 
         mock_conn.delete_container.assert_called_once_with(
             'test_c', response_dict={}
         )
         self._assertDictEqual(expected_r, r)
+        self.assertGreaterEqual(r['error_timestamp'], before)
+        self.assertLessEqual(r['error_timestamp'], after)
+        self.assertTrue('Traceback' in r['traceback'])
 
 
 class TestSwiftError(testtools.TestCase):
@@ -538,6 +579,230 @@ class TestSwiftUploadObject(testtools.TestCase):
         self.assertRaises(SwiftError, self.suo, [])
 
 
+class TestServiceList(_TestServiceBase):
+    def setUp(self):
+        super(TestServiceList, self).setUp()
+        self.opts = {'prefix': None, 'long': False, 'delimiter': ''}
+        self.exc = Exception('test_exc')
+        # Base response to be copied and updated to matched the expected
+        # response for each test
+        self.expected = {
+            'action': None,   # Should be list_X_part (account or container)
+            'container': None,   # Should be a string when listing a container
+            'prefix': None,
+            'success': None   # Should be a bool
+        }
+
+    def test_list_account(self):
+        mock_q = Queue()
+        mock_conn = self._get_mock_connection()
+        get_account_returns = [
+            (None, [{'name': 'test_c'}]),
+            (None, [])
+        ]
+        mock_conn.get_account = Mock(side_effect=get_account_returns)
+
+        expected_r = self._get_expected({
+            'action': 'list_account_part',
+            'success': True,
+            'listing': [{'name': 'test_c'}],
+            'marker': ''
+        })
+
+        SwiftService._list_account_job(
+            mock_conn, self.opts, mock_q
+        )
+        self._assertDictEqual(expected_r, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+        long_opts = dict(self.opts, **{'long': True})
+        mock_conn.head_container = Mock(return_value={'test_m': '1'})
+        get_account_returns = [
+            (None, [{'name': 'test_c'}]),
+            (None, [])
+        ]
+        mock_conn.get_account = Mock(side_effect=get_account_returns)
+
+        expected_r_long = self._get_expected({
+            'action': 'list_account_part',
+            'success': True,
+            'listing': [{'name': 'test_c', 'meta': {'test_m': '1'}}],
+            'marker': '',
+        })
+
+        SwiftService._list_account_job(
+            mock_conn, long_opts, mock_q
+        )
+        self._assertDictEqual(expected_r_long, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+    def test_list_account_exception(self):
+        mock_q = Queue()
+        mock_conn = self._get_mock_connection()
+        mock_conn.get_account = Mock(side_effect=self.exc)
+        expected_r = self._get_expected({
+            'action': 'list_account_part',
+            'success': False,
+            'error': self.exc,
+            'marker': '',
+            'traceback': mock.ANY,
+            'error_timestamp': mock.ANY
+        })
+
+        SwiftService._list_account_job(
+            mock_conn, self.opts, mock_q)
+
+        mock_conn.get_account.assert_called_once_with(
+            marker='', prefix=None
+        )
+        self._assertDictEqual(expected_r, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+    def test_list_container(self):
+        mock_q = Queue()
+        mock_conn = self._get_mock_connection()
+        get_container_returns = [
+            (None, [{'name': 'test_o'}]),
+            (None, [])
+        ]
+        mock_conn.get_container = Mock(side_effect=get_container_returns)
+
+        expected_r = self._get_expected({
+            'action': 'list_container_part',
+            'container': 'test_c',
+            'success': True,
+            'listing': [{'name': 'test_o'}],
+            'marker': ''
+        })
+
+        SwiftService._list_container_job(
+            mock_conn, 'test_c', self.opts, mock_q
+        )
+        self._assertDictEqual(expected_r, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+        long_opts = dict(self.opts, **{'long': True})
+        mock_conn.head_container = Mock(return_value={'test_m': '1'})
+        get_container_returns = [
+            (None, [{'name': 'test_o'}]),
+            (None, [])
+        ]
+        mock_conn.get_container = Mock(side_effect=get_container_returns)
+
+        expected_r_long = self._get_expected({
+            'action': 'list_container_part',
+            'container': 'test_c',
+            'success': True,
+            'listing': [{'name': 'test_o'}],
+            'marker': ''
+        })
+
+        SwiftService._list_container_job(
+            mock_conn, 'test_c', long_opts, mock_q
+        )
+        self._assertDictEqual(expected_r_long, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+    def test_list_container_exception(self):
+        mock_q = Queue()
+        mock_conn = self._get_mock_connection()
+        mock_conn.get_container = Mock(side_effect=self.exc)
+        expected_r = self._get_expected({
+            'action': 'list_container_part',
+            'container': 'test_c',
+            'success': False,
+            'error': self.exc,
+            'marker': '',
+            'error_timestamp': mock.ANY,
+            'traceback': mock.ANY
+        })
+
+        SwiftService._list_container_job(
+            mock_conn, 'test_c', self.opts, mock_q
+        )
+
+        mock_conn.get_container.assert_called_once_with(
+            'test_c', marker='', delimiter='', prefix=None
+        )
+        self._assertDictEqual(expected_r, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+    @mock.patch('swiftclient.service.get_conn')
+    def test_list_queue_size(self, mock_get_conn):
+        mock_conn = self._get_mock_connection()
+        # Return more results than should fit in the results queue
+        get_account_returns = [
+            (None, [{'name': 'container1'}]),
+            (None, [{'name': 'container2'}]),
+            (None, [{'name': 'container3'}]),
+            (None, [{'name': 'container4'}]),
+            (None, [{'name': 'container5'}]),
+            (None, [{'name': 'container6'}]),
+            (None, [{'name': 'container7'}]),
+            (None, [{'name': 'container8'}]),
+            (None, [{'name': 'container9'}]),
+            (None, [{'name': 'container10'}]),
+            (None, [{'name': 'container11'}]),
+            (None, [{'name': 'container12'}]),
+            (None, [{'name': 'container13'}]),
+            (None, [{'name': 'container14'}]),
+            (None, [])
+        ]
+        mock_conn.get_account = Mock(side_effect=get_account_returns)
+        mock_get_conn.return_value = mock_conn
+
+        s = SwiftService(options=self.opts)
+        lg = s.list()
+
+        # Start the generator
+        first_list_part = next(lg)
+
+        # Wait for the number of calls to get_account to reach our expected
+        # value, then let it run some more to make sure the value remains
+        # stable
+        count = mock_conn.get_account.call_count
+        stable = 0
+        while mock_conn.get_account.call_count != count or stable < 5:
+            if mock_conn.get_account.call_count == count:
+                stable += 1
+            else:
+                count = mock_conn.get_account.call_count
+                stable = 0
+            # The test requires a small sleep to allow other threads to
+            # execute - in this mocked environment we assume that if the call
+            # count to get_account has not changed in 0.25s then no more calls
+            # will be made.
+            sleep(0.05)
+
+        stable_get_account_call_count = mock_conn.get_account.call_count
+
+        # Collect all remaining results from the generator
+        list_results = [first_list_part] + list(lg)
+
+        # Make sure the stable call count is correct - this should be 12 calls
+        # to get_account;
+        #  1 for first_list_part
+        #  10 for the values on the queue
+        #  1 for the value blocking whilst trying to place onto the queue
+        self.assertEqual(12, stable_get_account_call_count)
+
+        # Make sure all the containers were listed and placed onto the queue
+        self.assertEqual(15, mock_conn.get_account.call_count)
+
+        # Check the results were all returned
+        observed_listing = []
+        for lir in list_results:
+            observed_listing.append(
+                [li['name'] for li in lir['listing']]
+            )
+        expected_listing = []
+        for gar in get_account_returns[:-1]:  # The empty list is not returned
+            expected_listing.append(
+                [li['name'] for li in gar[1]]
+            )
+        self.assertEqual(observed_listing, expected_listing)
+
+
 class TestService(testtools.TestCase):
 
     def test_upload_with_bad_segment_size(self):
@@ -551,24 +816,41 @@ class TestService(testtools.TestCase):
                 self.assertEqual('Segment size should be an integer value',
                                  exc.value)
 
+    @mock.patch('swiftclient.service.stat')
+    @mock.patch('swiftclient.service.getmtime', return_value=1.0)
+    @mock.patch('swiftclient.service.getsize', return_value=4)
+    @mock.patch.object(builtins, 'open', return_value=six.StringIO('asdf'))
+    def test_upload_with_relative_path(self, *args, **kwargs):
+        service = SwiftService({})
+        objects = [{'path': "./test",
+                    'strt_indx': 2},
+                   {'path': os.path.join(os.getcwd(), "test"),
+                    'strt_indx': 1},
+                   {'path': ".\\test",
+                    'strt_indx': 2}]
+        for obj in objects:
+            with mock.patch('swiftclient.service.Connection') as mock_conn:
+                mock_conn.return_value.head_object.side_effect = \
+                    ClientException('Not Found', http_status=404)
+                mock_conn.return_value.put_object.return_value =\
+                    'd41d8cd98f00b204e9800998ecf8427e'
+                resp_iter = service.upload(
+                    'c', [SwiftUploadObject(obj['path'])])
+                responses = [x for x in resp_iter]
+                for resp in responses:
+                    self.assertTrue(resp['success'])
+                self.assertEqual(2, len(responses))
+                create_container_resp, upload_obj_resp = responses
+                self.assertEqual(create_container_resp['action'],
+                                 'create_container')
+                self.assertEqual(upload_obj_resp['action'],
+                                 'upload_object')
+                self.assertEqual(upload_obj_resp['object'],
+                                 obj['path'][obj['strt_indx']:])
+                self.assertEqual(upload_obj_resp['path'], obj['path'])
 
-class TestServiceUpload(testtools.TestCase):
 
-    def _assertDictEqual(self, a, b, m=None):
-        # assertDictEqual is not available in py2.6 so use a shallow check
-        # instead
-        if not m:
-            m = '{0} != {1}'.format(a, b)
-
-        if hasattr(self, 'assertDictEqual'):
-            self.assertDictEqual(a, b, m)
-        else:
-            self.assertIsInstance(a, dict, m)
-            self.assertIsInstance(b, dict, m)
-            self.assertEqual(len(a), len(b), m)
-            for k, v in a.items():
-                self.assertIn(k, b, m)
-                self.assertEqual(b[k], v, m)
+class TestServiceUpload(_TestServiceBase):
 
     def test_upload_segment_job(self):
         with tempfile.NamedTemporaryFile() as f:
@@ -860,3 +1142,802 @@ class TestServiceUpload(testtools.TestCase):
 
             contents = mock_conn.put_object.call_args[0][2]
             self.assertEqual(contents.get_md5sum(), md5(b'a' * 30).hexdigest())
+
+    def test_upload_object_job_identical_etag(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+
+            mock_conn = mock.Mock()
+            mock_conn.head_object.return_value = {
+                'content-length': 30,
+                'etag': md5(b'a' * 30).hexdigest()}
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+
+            s = SwiftService()
+            r = s._upload_object_job(conn=mock_conn,
+                                     container='test_c',
+                                     source=f.name,
+                                     obj='test_o',
+                                     options={'changed': False,
+                                              'skip_identical': True,
+                                              'leave_segments': True,
+                                              'header': '',
+                                              'segment_size': 0})
+
+            self.assertTrue(r['success'])
+            self.assertIn('status', r)
+            self.assertEqual(r['status'], 'skipped-identical')
+            self.assertEqual(mock_conn.put_object.call_count, 0)
+            self.assertEqual(mock_conn.head_object.call_count, 1)
+            mock_conn.head_object.assert_called_with('test_c', 'test_o')
+
+    def test_upload_object_job_identical_slo_with_nesting(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+            seg_etag = md5(b'a' * 10).hexdigest()
+            submanifest = "[%s]" % ",".join(
+                ['{"bytes":10,"hash":"%s"}' % seg_etag] * 2)
+            submanifest_etag = md5(seg_etag.encode('ascii') * 2).hexdigest()
+            manifest = "[%s]" % ",".join([
+                '{"sub_slo":true,"name":"/test_c_segments/test_sub_slo",'
+                '"bytes":20,"hash":"%s"}' % submanifest_etag,
+                '{"bytes":10,"hash":"%s"}' % seg_etag])
+
+            mock_conn = mock.Mock()
+            mock_conn.head_object.return_value = {
+                'x-static-large-object': True,
+                'content-length': 30,
+                'etag': md5(submanifest_etag.encode('ascii') +
+                            seg_etag.encode('ascii')).hexdigest()}
+            mock_conn.get_object.side_effect = [
+                ({}, manifest.encode('ascii')),
+                ({}, submanifest.encode('ascii'))]
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+
+            s = SwiftService()
+            r = s._upload_object_job(conn=mock_conn,
+                                     container='test_c',
+                                     source=f.name,
+                                     obj='test_o',
+                                     options={'changed': False,
+                                              'skip_identical': True,
+                                              'leave_segments': True,
+                                              'header': '',
+                                              'segment_size': 10})
+
+            self.assertIsNone(r.get('error'))
+            self.assertTrue(r['success'])
+            self.assertEqual('skipped-identical', r.get('status'))
+            self.assertEqual(0, mock_conn.put_object.call_count)
+            self.assertEqual([mock.call('test_c', 'test_o')],
+                             mock_conn.head_object.mock_calls)
+            self.assertEqual([
+                mock.call('test_c', 'test_o',
+                          query_string='multipart-manifest=get'),
+                mock.call('test_c_segments', 'test_sub_slo',
+                          query_string='multipart-manifest=get'),
+            ], mock_conn.get_object.mock_calls)
+
+    def test_upload_object_job_identical_dlo(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+            segment_etag = md5(b'a' * 10).hexdigest()
+
+            mock_conn = mock.Mock()
+            mock_conn.head_object.return_value = {
+                'x-object-manifest': 'test_c_segments/test_o/prefix',
+                'content-length': 30,
+                'etag': md5(segment_etag.encode('ascii') * 3).hexdigest()}
+            mock_conn.get_container.side_effect = [
+                (None, [{"bytes": 10, "hash": segment_etag,
+                         "name": "test_o/prefix/00"},
+                        {"bytes": 10, "hash": segment_etag,
+                         "name": "test_o/prefix/01"}]),
+                (None, [{"bytes": 10, "hash": segment_etag,
+                         "name": "test_o/prefix/02"}]),
+                (None, {})]
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+
+            s = SwiftService()
+            with mock.patch('swiftclient.service.get_conn',
+                            return_value=mock_conn):
+                r = s._upload_object_job(conn=mock_conn,
+                                         container='test_c',
+                                         source=f.name,
+                                         obj='test_o',
+                                         options={'changed': False,
+                                                  'skip_identical': True,
+                                                  'leave_segments': True,
+                                                  'header': '',
+                                                  'segment_size': 10})
+
+            self.assertIsNone(r.get('error'))
+            self.assertTrue(r['success'])
+            self.assertEqual('skipped-identical', r.get('status'))
+            self.assertEqual(0, mock_conn.put_object.call_count)
+            self.assertEqual(1, mock_conn.head_object.call_count)
+            self.assertEqual(3, mock_conn.get_container.call_count)
+            mock_conn.head_object.assert_called_with('test_c', 'test_o')
+            expected = [
+                mock.call('test_c_segments', prefix='test_o/prefix',
+                          marker='', delimiter=None),
+                mock.call('test_c_segments', prefix='test_o/prefix',
+                          marker="test_o/prefix/01", delimiter=None),
+                mock.call('test_c_segments', prefix='test_o/prefix',
+                          marker="test_o/prefix/02", delimiter=None),
+            ]
+            mock_conn.get_container.assert_has_calls(expected)
+
+
+class TestServiceDownload(_TestServiceBase):
+
+    def setUp(self):
+        super(TestServiceDownload, self).setUp()
+        self.opts = swiftclient.service._default_local_options.copy()
+        self.opts['no_download'] = True
+        self.obj_content = b'c' * 10
+        self.obj_etag = md5(self.obj_content).hexdigest()
+        self.obj_len = len(self.obj_content)
+        self.exc = Exception('test_exc')
+        # Base response to be copied and updated to matched the expected
+        # response for each test
+        self.expected = {
+            'action': 'download_object',   # Should always be download_object
+            'container': 'test_c',
+            'object': 'test_o',
+            'attempts': 2,
+            'response_dict': {},
+            'path': 'test_o',
+            'pseudodir': False,
+            'success': None   # Should be a bool
+        }
+
+    def _readbody(self):
+        yield self.obj_content
+
+    @mock.patch('swiftclient.service.SwiftService.list')
+    @mock.patch('swiftclient.service.SwiftService._submit_page_downloads')
+    @mock.patch('swiftclient.service.interruptable_as_completed')
+    def test_download_container_job(self, as_comp, sub_page, service_list):
+        """
+        Check that paged downloads work correctly
+        """
+        obj_count = [0]
+
+        def make_counting_generator(object_to_yield, total_count):
+            # maintain a counter of objects yielded
+            count = [0]
+
+            def counting_generator():
+                while count[0] < 10:
+                    yield object_to_yield
+                    count[0] += 1
+                    total_count[0] += 1
+            return counting_generator()
+
+        obj_count_on_sub_page_call = []
+        sub_page_call_count = [0]
+
+        def fake_sub_page(*args):
+            # keep a record of obj_count when this function is called
+            obj_count_on_sub_page_call.append(obj_count[0])
+            sub_page_call_count[0] += 1
+            if sub_page_call_count[0] < 3:
+                return range(0, 10)
+            return None
+
+        sub_page.side_effect = fake_sub_page
+
+        r = Mock(spec=Future)
+        r.result.return_value = self._get_expected({
+            'success': True,
+            'start_time': 1,
+            'finish_time': 2,
+            'headers_receipt': 3,
+            'auth_end_time': 4,
+            'read_length': len(b'objcontent'),
+        })
+
+        as_comp.side_effect = [
+            make_counting_generator(r, obj_count),
+            make_counting_generator(r, obj_count)
+        ]
+
+        s = SwiftService()
+        down_gen = s._download_container('test_c', self.opts)
+        results = list(down_gen)
+        self.assertEqual(20, len(results))
+        self.assertEqual(2, as_comp.call_count)
+        self.assertEqual(3, sub_page_call_count[0])
+        self.assertEqual([0, 7, 17], obj_count_on_sub_page_call)
+
+    @mock.patch('swiftclient.service.SwiftService.list')
+    @mock.patch('swiftclient.service.SwiftService._submit_page_downloads')
+    @mock.patch('swiftclient.service.interruptable_as_completed')
+    def test_download_container_job_error(
+            self, as_comp, sub_page, service_list):
+        """
+        Check that paged downloads work correctly
+        """
+        class BoomError(Exception):
+            def __init__(self, value):
+                self.value = value
+
+            def __str__(self):
+                return repr(self.value)
+
+        def _make_result():
+            r = Mock(spec=Future)
+            r.result.return_value = self._get_expected({
+                'success': True,
+                'start_time': 1,
+                'finish_time': 2,
+                'headers_receipt': 3,
+                'auth_end_time': 4,
+                'read_length': len(b'objcontent'),
+            })
+            return r
+
+        as_comp.side_effect = [
+
+        ]
+        # We need Futures here because the error will cause a call to .cancel()
+        sub_page_effects = [
+            [_make_result() for _ in range(0, 10)],
+            BoomError('Go Boom')
+        ]
+        sub_page.side_effect = sub_page_effects
+        # ...but we must also mock the returns to as_completed
+        as_comp.side_effect = [
+            [_make_result() for _ in range(0, 10)]
+        ]
+
+        s = SwiftService()
+        self.assertRaises(
+            BoomError,
+            lambda: list(s._download_container('test_c', self.opts))
+        )
+        # This was an unknown error, so make sure we attempt to cancel futures
+        for spe in sub_page_effects[0]:
+            spe.cancel.assert_called_once_with()
+        self.assertEqual(1, as_comp.call_count)
+
+        # Now test ClientException
+        sub_page_effects = [
+            [_make_result() for _ in range(0, 10)],
+            ClientException('Go Boom')
+        ]
+        sub_page.side_effect = sub_page_effects
+        as_comp.reset_mock()
+        as_comp.side_effect = [
+            [_make_result() for _ in range(0, 10)],
+        ]
+        self.assertRaises(
+            ClientException,
+            lambda: list(s._download_container('test_c', self.opts))
+        )
+        # This was a ClientException, so make sure we don't cancel futures
+        for spe in sub_page_effects[0]:
+            self.assertFalse(spe.cancel.called)
+        self.assertEqual(1, as_comp.call_count)
+
+    def test_download_object_job(self):
+        mock_conn = self._get_mock_connection()
+        objcontent = six.BytesIO(b'objcontent')
+        mock_conn.get_object.side_effect = [
+            ({'content-type': 'text/plain',
+              'etag': '2cbbfe139a744d6abbe695e17f3c1991'},
+             objcontent)
+        ]
+        expected_r = self._get_expected({
+            'success': True,
+            'start_time': 1,
+            'finish_time': 2,
+            'headers_receipt': 3,
+            'auth_end_time': 4,
+            'read_length': len(b'objcontent'),
+        })
+
+        with mock.patch.object(builtins, 'open') as mock_open:
+            written_content = Mock()
+            mock_open.return_value = written_content
+            s = SwiftService()
+            _opts = self.opts.copy()
+            _opts['no_download'] = False
+            actual_r = s._download_object_job(
+                mock_conn, 'test_c', 'test_o', _opts)
+            actual_r = dict(  # Need to override the times we got from the call
+                actual_r,
+                **{
+                    'start_time': 1,
+                    'finish_time': 2,
+                    'headers_receipt': 3
+                }
+            )
+            mock_open.assert_called_once_with('test_o', 'wb')
+            written_content.write.assert_called_once_with(b'objcontent')
+
+        mock_conn.get_object.assert_called_once_with(
+            'test_c', 'test_o', resp_chunk_size=65536, headers={},
+            response_dict={}
+        )
+        self._assertDictEqual(expected_r, actual_r)
+
+    def test_download_object_job_exception(self):
+        mock_conn = self._get_mock_connection()
+        mock_conn.get_object = Mock(side_effect=self.exc)
+        expected_r = self._get_expected({
+            'success': False,
+            'error': self.exc,
+            'error_timestamp': mock.ANY,
+            'traceback': mock.ANY
+        })
+
+        s = SwiftService()
+        actual_r = s._download_object_job(
+            mock_conn, 'test_c', 'test_o', self.opts)
+
+        mock_conn.get_object.assert_called_once_with(
+            'test_c', 'test_o', resp_chunk_size=65536, headers={},
+            response_dict={}
+        )
+        self._assertDictEqual(expected_r, actual_r)
+
+    def test_download(self):
+        service = SwiftService()
+        with mock.patch('swiftclient.service.Connection') as mock_conn:
+            header = {'content-length': self.obj_len,
+                      'etag': self.obj_etag}
+            mock_conn.get_object.return_value = header, self._readbody()
+
+            resp = service._download_object_job(mock_conn,
+                                                'c',
+                                                'test',
+                                                self.opts)
+
+        self.assertTrue(resp['success'])
+        self.assertEqual(resp['action'], 'download_object')
+        self.assertEqual(resp['object'], 'test')
+        self.assertEqual(resp['path'], 'test')
+
+    def test_download_with_output_dir(self):
+        service = SwiftService()
+        with mock.patch('swiftclient.service.Connection') as mock_conn:
+            header = {'content-length': self.obj_len,
+                      'etag': self.obj_etag}
+            mock_conn.get_object.return_value = header, self._readbody()
+
+            options = self.opts.copy()
+            options['out_directory'] = 'temp_dir'
+            resp = service._download_object_job(mock_conn,
+                                                'c',
+                                                'example/test',
+                                                options)
+
+        self.assertTrue(resp['success'])
+        self.assertEqual(resp['action'], 'download_object')
+        self.assertEqual(resp['object'], 'example/test')
+        self.assertEqual(resp['path'], 'temp_dir/example/test')
+
+    def test_download_with_remove_prefix(self):
+        service = SwiftService()
+        with mock.patch('swiftclient.service.Connection') as mock_conn:
+            header = {'content-length': self.obj_len,
+                      'etag': self.obj_etag}
+            mock_conn.get_object.return_value = header, self._readbody()
+
+            options = self.opts.copy()
+            options['prefix'] = 'example/'
+            options['remove_prefix'] = True
+            resp = service._download_object_job(mock_conn,
+                                                'c',
+                                                'example/test',
+                                                options)
+
+        self.assertTrue(resp['success'])
+        self.assertEqual(resp['action'], 'download_object')
+        self.assertEqual(resp['object'], 'example/test')
+        self.assertEqual(resp['path'], 'test')
+
+    def test_download_with_remove_prefix_and_remove_slashes(self):
+        service = SwiftService()
+        with mock.patch('swiftclient.service.Connection') as mock_conn:
+            header = {'content-length': self.obj_len,
+                      'etag': self.obj_etag}
+            mock_conn.get_object.return_value = header, self._readbody()
+
+            options = self.opts.copy()
+            options['prefix'] = 'example'
+            options['remove_prefix'] = True
+            resp = service._download_object_job(mock_conn,
+                                                'c',
+                                                'example/test',
+                                                options)
+
+        self.assertTrue(resp['success'])
+        self.assertEqual(resp['action'], 'download_object')
+        self.assertEqual(resp['object'], 'example/test')
+        self.assertEqual(resp['path'], 'test')
+
+    def test_download_with_output_dir_and_remove_prefix(self):
+        service = SwiftService()
+        with mock.patch('swiftclient.service.Connection') as mock_conn:
+            header = {'content-length': self.obj_len,
+                      'etag': self.obj_etag}
+            mock_conn.get_object.return_value = header, self._readbody()
+
+            options = self.opts.copy()
+            options['prefix'] = 'example'
+            options['out_directory'] = 'new/dir'
+            options['remove_prefix'] = True
+            resp = service._download_object_job(mock_conn,
+                                                'c',
+                                                'example/test',
+                                                options)
+
+        self.assertTrue(resp['success'])
+        self.assertEqual(resp['action'], 'download_object')
+        self.assertEqual(resp['object'], 'example/test')
+        self.assertEqual(resp['path'], 'new/dir/test')
+
+    def test_download_object_job_skip_identical(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+
+            err = swiftclient.ClientException('Object GET failed',
+                                              http_status=304)
+
+            def fake_get(*args, **kwargs):
+                kwargs['response_dict']['headers'] = {}
+                raise err
+
+            mock_conn = mock.Mock()
+            mock_conn.get_object.side_effect = fake_get
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+            expected_r = {
+                'action': 'download_object',
+                'container': 'test_c',
+                'object': 'test_o',
+                'success': False,
+                'error': err,
+                'response_dict': {'headers': {}},
+                'path': 'test_o',
+                'pseudodir': False,
+                'attempts': 2,
+                'traceback': mock.ANY,
+                'error_timestamp': mock.ANY
+            }
+
+            s = SwiftService()
+            r = s._download_object_job(conn=mock_conn,
+                                       container='test_c',
+                                       obj='test_o',
+                                       options={'out_file': f.name,
+                                                'out_directory': None,
+                                                'prefix': None,
+                                                'remove_prefix': False,
+                                                'header': {},
+                                                'yes_all': False,
+                                                'skip_identical': True})
+            self._assertDictEqual(r, expected_r)
+
+            self.assertEqual(mock_conn.get_object.call_count, 1)
+            mock_conn.get_object.assert_called_with(
+                'test_c',
+                'test_o',
+                resp_chunk_size=65536,
+                headers={'If-None-Match': md5(b'a' * 30).hexdigest()},
+                query_string='multipart-manifest=get',
+                response_dict=expected_r['response_dict'])
+
+    def test_download_object_job_skip_identical_dlo(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+            on_disk_md5 = md5(b'a' * 30).hexdigest()
+            segment_md5 = md5(b'a' * 10).hexdigest()
+
+            mock_conn = mock.Mock()
+            mock_conn.get_object.return_value = (
+                {'x-object-manifest': 'test_c_segments/test_o/prefix'}, [b''])
+            mock_conn.get_container.side_effect = [
+                (None, [{'name': 'test_o/prefix/1',
+                         'bytes': 10, 'hash': segment_md5},
+                        {'name': 'test_o/prefix/2',
+                         'bytes': 10, 'hash': segment_md5}]),
+                (None, [{'name': 'test_o/prefix/3',
+                         'bytes': 10, 'hash': segment_md5}]),
+                (None, [])]
+
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+            expected_r = {
+                'action': 'download_object',
+                'container': 'test_c',
+                'object': 'test_o',
+                'success': False,
+                'response_dict': {},
+                'path': 'test_o',
+                'pseudodir': False,
+                'attempts': 2,
+                'traceback': mock.ANY,
+                'error_timestamp': mock.ANY
+            }
+
+            s = SwiftService()
+            with mock.patch('swiftclient.service.get_conn',
+                            return_value=mock_conn):
+                r = s._download_object_job(conn=mock_conn,
+                                           container='test_c',
+                                           obj='test_o',
+                                           options={'out_file': f.name,
+                                                    'out_directory': None,
+                                                    'prefix': None,
+                                                    'remove_prefix': False,
+                                                    'header': {},
+                                                    'yes_all': False,
+                                                    'skip_identical': True})
+
+            err = r.pop('error')
+            self.assertEqual("Large object is identical", err.msg)
+            self.assertEqual(304, err.http_status)
+
+            self._assertDictEqual(r, expected_r)
+
+            self.assertEqual(mock_conn.get_object.call_count, 1)
+            mock_conn.get_object.assert_called_with(
+                'test_c',
+                'test_o',
+                resp_chunk_size=65536,
+                headers={'If-None-Match': on_disk_md5},
+                query_string='multipart-manifest=get',
+                response_dict=expected_r['response_dict'])
+            self.assertEqual(mock_conn.get_container.mock_calls, [
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker=''),
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker='test_o/prefix/2'),
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker='test_o/prefix/3')])
+
+    def test_download_object_job_skip_identical_nested_slo(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.flush()
+            on_disk_md5 = md5(b'a' * 30).hexdigest()
+
+            seg_etag = md5(b'a' * 10).hexdigest()
+            submanifest = "[%s]" % ",".join(
+                ['{"bytes":10,"hash":"%s"}' % seg_etag] * 2)
+            submanifest_etag = md5(seg_etag.encode('ascii') * 2).hexdigest()
+            manifest = "[%s]" % ",".join([
+                '{"sub_slo":true,"name":"/test_c_segments/test_sub_slo",'
+                '"bytes":20,"hash":"%s"}' % submanifest_etag,
+                '{"bytes":10,"hash":"%s"}' % seg_etag])
+
+            mock_conn = mock.Mock()
+            mock_conn.get_object.side_effect = [
+                ({'x-static-large-object': True,
+                  'content-length': 30,
+                  'etag': md5(submanifest_etag.encode('ascii') +
+                              seg_etag.encode('ascii')).hexdigest()},
+                 [manifest.encode('ascii')]),
+                ({'x-static-large-object': True,
+                  'content-length': 20,
+                  'etag': submanifest_etag},
+                 submanifest.encode('ascii'))]
+
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+            expected_r = {
+                'action': 'download_object',
+                'container': 'test_c',
+                'object': 'test_o',
+                'success': False,
+                'response_dict': {},
+                'path': 'test_o',
+                'pseudodir': False,
+                'attempts': 2,
+                'traceback': mock.ANY,
+                'error_timestamp': mock.ANY
+            }
+
+            s = SwiftService()
+            with mock.patch('swiftclient.service.get_conn',
+                            return_value=mock_conn):
+                r = s._download_object_job(conn=mock_conn,
+                                           container='test_c',
+                                           obj='test_o',
+                                           options={'out_file': f.name,
+                                                    'out_directory': None,
+                                                    'prefix': None,
+                                                    'remove_prefix': False,
+                                                    'header': {},
+                                                    'yes_all': False,
+                                                    'skip_identical': True})
+
+            err = r.pop('error')
+            self.assertEqual("Large object is identical", err.msg)
+            self.assertEqual(304, err.http_status)
+
+            self._assertDictEqual(r, expected_r)
+            self.assertEqual(mock_conn.get_object.mock_calls, [
+                mock.call('test_c',
+                          'test_o',
+                          resp_chunk_size=65536,
+                          headers={'If-None-Match': on_disk_md5},
+                          query_string='multipart-manifest=get',
+                          response_dict={}),
+                mock.call('test_c_segments',
+                          'test_sub_slo',
+                          query_string='multipart-manifest=get')])
+
+    def test_download_object_job_skip_identical_diff_dlo(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 30)
+            f.write(b'b')
+            f.flush()
+            on_disk_md5 = md5(b'a' * 30 + b'b').hexdigest()
+            segment_md5 = md5(b'a' * 10).hexdigest()
+
+            mock_conn = mock.Mock()
+            mock_conn.get_object.side_effect = [
+                ({'x-object-manifest': 'test_c_segments/test_o/prefix'},
+                 [b'']),
+                ({'x-object-manifest': 'test_c_segments/test_o/prefix'},
+                 [b'a' * 30])]
+            mock_conn.get_container.side_effect = [
+                (None, [{'name': 'test_o/prefix/1',
+                         'bytes': 10, 'hash': segment_md5},
+                        {'name': 'test_o/prefix/2',
+                         'bytes': 10, 'hash': segment_md5}]),
+                (None, [{'name': 'test_o/prefix/3',
+                         'bytes': 10, 'hash': segment_md5}]),
+                (None, [])]
+
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+            type(mock_conn).auth_end_time = mock.PropertyMock(return_value=14)
+            expected_r = {
+                'action': 'download_object',
+                'container': 'test_c',
+                'object': 'test_o',
+                'success': True,
+                'response_dict': {},
+                'path': 'test_o',
+                'pseudodir': False,
+                'read_length': 30,
+                'attempts': 2,
+                'start_time': 0,
+                'headers_receipt': 1,
+                'finish_time': 2,
+                'auth_end_time': mock_conn.auth_end_time,
+            }
+
+            options = self.opts.copy()
+            options['out_file'] = f.name
+            options['skip_identical'] = True
+            s = SwiftService()
+            with mock.patch('swiftclient.service.time', side_effect=range(3)):
+                with mock.patch('swiftclient.service.get_conn',
+                                return_value=mock_conn):
+                    r = s._download_object_job(
+                        conn=mock_conn,
+                        container='test_c',
+                        obj='test_o',
+                        options=options)
+
+            self._assertDictEqual(r, expected_r)
+
+            self.assertEqual(mock_conn.get_container.mock_calls, [
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker=''),
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker='test_o/prefix/2'),
+                mock.call('test_c_segments',
+                          delimiter=None,
+                          prefix='test_o/prefix',
+                          marker='test_o/prefix/3')])
+            self.assertEqual(mock_conn.get_object.mock_calls, [
+                mock.call('test_c',
+                          'test_o',
+                          resp_chunk_size=65536,
+                          headers={'If-None-Match': on_disk_md5},
+                          query_string='multipart-manifest=get',
+                          response_dict={}),
+                mock.call('test_c',
+                          'test_o',
+                          resp_chunk_size=65536,
+                          headers={'If-None-Match': on_disk_md5},
+                          response_dict={})])
+
+    def test_download_object_job_skip_identical_diff_nested_slo(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b'a' * 29)
+            f.flush()
+            on_disk_md5 = md5(b'a' * 29).hexdigest()
+
+            seg_etag = md5(b'a' * 10).hexdigest()
+            submanifest = "[%s]" % ",".join(
+                ['{"bytes":10,"hash":"%s"}' % seg_etag] * 2)
+            submanifest_etag = md5(seg_etag.encode('ascii') * 2).hexdigest()
+            manifest = "[%s]" % ",".join([
+                '{"sub_slo":true,"name":"/test_c_segments/test_sub_slo",'
+                '"bytes":20,"hash":"%s"}' % submanifest_etag,
+                '{"bytes":10,"hash":"%s"}' % seg_etag])
+
+            mock_conn = mock.Mock()
+            mock_conn.get_object.side_effect = [
+                ({'x-static-large-object': True,
+                  'content-length': 30,
+                  'etag': md5(submanifest_etag.encode('ascii') +
+                              seg_etag.encode('ascii')).hexdigest()},
+                 [manifest.encode('ascii')]),
+                ({'x-static-large-object': True,
+                  'content-length': 20,
+                  'etag': submanifest_etag},
+                 submanifest.encode('ascii')),
+                ({'x-static-large-object': True,
+                  'content-length': 30,
+                  'etag': md5(submanifest_etag.encode('ascii') +
+                              seg_etag.encode('ascii')).hexdigest()},
+                 [b'a' * 30])]
+
+            type(mock_conn).attempts = mock.PropertyMock(return_value=2)
+            type(mock_conn).auth_end_time = mock.PropertyMock(return_value=14)
+            expected_r = {
+                'action': 'download_object',
+                'container': 'test_c',
+                'object': 'test_o',
+                'success': True,
+                'response_dict': {},
+                'path': 'test_o',
+                'pseudodir': False,
+                'read_length': 30,
+                'attempts': 2,
+                'start_time': 0,
+                'headers_receipt': 1,
+                'finish_time': 2,
+                'auth_end_time': mock_conn.auth_end_time,
+            }
+
+            options = self.opts.copy()
+            options['out_file'] = f.name
+            options['skip_identical'] = True
+            s = SwiftService()
+            with mock.patch('swiftclient.service.time', side_effect=range(3)):
+                with mock.patch('swiftclient.service.get_conn',
+                                return_value=mock_conn):
+                    r = s._download_object_job(
+                        conn=mock_conn,
+                        container='test_c',
+                        obj='test_o',
+                        options=options)
+
+            self._assertDictEqual(r, expected_r)
+            self.assertEqual(mock_conn.get_object.mock_calls, [
+                mock.call('test_c',
+                          'test_o',
+                          resp_chunk_size=65536,
+                          headers={'If-None-Match': on_disk_md5},
+                          query_string='multipart-manifest=get',
+                          response_dict={}),
+                mock.call('test_c_segments',
+                          'test_sub_slo',
+                          query_string='multipart-manifest=get'),
+                mock.call('test_c',
+                          'test_o',
+                          resp_chunk_size=65536,
+                          headers={'If-None-Match': on_disk_md5},
+                          response_dict={})])

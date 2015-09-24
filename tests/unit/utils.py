@@ -38,8 +38,10 @@ def fake_get_auth_keystone(expected_os_options=None, exc=None,
         if exc:
             raise exc('test')
         # TODO: some way to require auth_url, user and key?
-        if expected_os_options and actual_os_options != expected_os_options:
-            return "", None
+        if expected_os_options:
+            for key, value in actual_os_options.items():
+                if value and value != expected_os_options.get(key):
+                    return "", None
         if 'required_kwargs' in kwargs:
             for k, v in kwargs['required_kwargs'].items():
                 if v != actual_kwargs.get(k):
@@ -155,7 +157,10 @@ def fake_http_connect(*code_iter, **kwargs):
                     sleep(0.1)
                     return ' '
             rv = self.body[:amt]
-            self.body = self.body[amt:]
+            if amt is not None:
+                self.body = self.body[amt:]
+            else:
+                self.body = ''
             return rv
 
         def send(self, amt=None):
@@ -208,6 +213,12 @@ class MockHttpTest(testtools.TestCase):
         self.fake_connect = None
         self.request_log = []
 
+        # Capture output, since the test-runner stdout/stderr moneky-patching
+        # won't cover the references to sys.stdout/sys.stderr in
+        # swiftclient.multithreading
+        self.capture_output = CaptureOutput()
+        self.capture_output.__enter__()
+
         def fake_http_connection(*args, **kwargs):
             self.validateMockedRequestsConsumed()
             self.request_log = []
@@ -220,7 +231,7 @@ class MockHttpTest(testtools.TestCase):
             on_request = kwargs.get('on_request')
 
             def wrapper(url, proxy=None, cacert=None, insecure=False,
-                        ssl_compression=True):
+                        ssl_compression=True, timeout=None):
                 if storage_url:
                     self.assertEqual(storage_url, url)
 
@@ -368,32 +379,32 @@ class MockHttpTest(testtools.TestCase):
         # un-hygienic mocking on the swiftclient.client module; which may lead
         # to some unfortunate test order dependency bugs by way of the broken
         # window theory if any other modules are similarly patched
+        self.capture_output.__exit__()
         reload_module(c)
 
 
-class CaptureStreamBuffer(object):
+class CaptureStreamPrinter(object):
     """
-    CaptureStreamBuffer is used for testing raw byte writing for PY3. Anything
-    written here is decoded as utf-8 and written to the parent CaptureStream
+    CaptureStreamPrinter is used for testing unicode writing for PY3. Anything
+    written here is encoded as utf-8 and written to the parent CaptureStream
     """
     def __init__(self, captured_stream):
         self._captured_stream = captured_stream
 
-    def write(self, bytes_data):
+    def write(self, data):
         # No encoding, just convert the raw bytes into a str for testing
         # The below call also validates that we have a byte string.
         self._captured_stream.write(
-            ''.join(map(chr, bytes_data))
-        )
+            data if isinstance(data, six.binary_type) else data.encode('utf8'))
 
 
 class CaptureStream(object):
 
     def __init__(self, stream):
         self.stream = stream
-        self._capture = six.StringIO()
-        self._buffer = CaptureStreamBuffer(self)
-        self.streams = [self.stream, self._capture]
+        self._buffer = six.BytesIO()
+        self._capture = CaptureStreamPrinter(self._buffer)
+        self.streams = [self._capture]
 
     @property
     def buffer(self):
@@ -415,11 +426,11 @@ class CaptureStream(object):
             stream.writelines(*args, **kwargs)
 
     def getvalue(self):
-        return self._capture.getvalue()
+        return self._buffer.getvalue()
 
     def clear(self):
-        self._capture.truncate(0)
-        self._capture.seek(0)
+        self._buffer.truncate(0)
+        self._buffer.seek(0)
 
 
 class CaptureOutput(object):
@@ -457,11 +468,11 @@ class CaptureOutput(object):
 
     @property
     def out(self):
-        return self._out.getvalue()
+        return self._out.getvalue().decode('utf8')
 
     @property
     def err(self):
-        return self._err.getvalue()
+        return self._err.getvalue().decode('utf8')
 
     def clear(self):
         self._out.clear()
@@ -480,3 +491,52 @@ class CaptureOutput(object):
 
     def __getattr__(self, name):
         return getattr(self.out, name)
+
+
+class FakeKeystone(object):
+    '''
+    Fake keystone client module. Returns given endpoint url and auth token.
+    '''
+    def __init__(self, endpoint, token):
+        self.calls = []
+        self.auth_version = None
+        self.endpoint = endpoint
+        self.token = token
+
+    class _Client(object):
+        def __init__(self, endpoint, token, **kwargs):
+            self.auth_token = token
+            self.endpoint = endpoint
+            self.service_catalog = self.ServiceCatalog(endpoint)
+
+        class ServiceCatalog(object):
+            def __init__(self, endpoint):
+                self.calls = []
+                self.endpoint_url = endpoint
+
+            def url_for(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.endpoint_url
+
+    def Client(self, **kwargs):
+        self.calls.append(kwargs)
+        self.client = self._Client(endpoint=self.endpoint, token=self.token,
+                                   **kwargs)
+        return self.client
+
+    class Unauthorized(Exception):
+        pass
+
+    class AuthorizationFailure(Exception):
+        pass
+
+    class EndpointNotFound(Exception):
+        pass
+
+
+def _make_fake_import_keystone_client(fake_import):
+    def _fake_import_keystone_client(auth_version):
+        fake_import.auth_version = auth_version
+        return fake_import, fake_import
+
+    return _fake_import_keystone_client

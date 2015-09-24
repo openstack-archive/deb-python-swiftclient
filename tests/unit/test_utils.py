@@ -132,17 +132,24 @@ class TestTempURL(testtools.TestCase):
         self.key = 'correcthorsebatterystaple'
         self.method = 'GET'
 
-    @mock.patch('hmac.HMAC.hexdigest')
-    @mock.patch('time.time')
+    @mock.patch('hmac.HMAC.hexdigest', return_value='temp_url_signature')
+    @mock.patch('time.time', return_value=1400000000)
     def test_generate_temp_url(self, time_mock, hmac_mock):
-        time_mock.return_value = 1400000000
-        hmac_mock.return_value = 'temp_url_signature'
         expected_url = (
             '/v1/AUTH_account/c/o?'
             'temp_url_sig=temp_url_signature&'
             'temp_url_expires=1400003600')
         url = u.generate_temp_url(self.url, self.seconds, self.key,
                                   self.method)
+        self.assertEqual(url, expected_url)
+
+    @mock.patch('hmac.HMAC.hexdigest', return_value="temp_url_signature")
+    def test_generate_absolute_expiry_temp_url(self, hmac_mock):
+        expected_url = ('/v1/AUTH_account/c/o?'
+                        'temp_url_sig=temp_url_signature&'
+                        'temp_url_expires=2146636800')
+        url = u.generate_temp_url(self.url, 2146636800, self.key, self.method,
+                                  absolute=True)
         self.assertEqual(url, expected_url)
 
     def test_generate_temp_url_bad_seconds(self):
@@ -176,19 +183,19 @@ class TestReadableToIterable(testtools.TestCase):
             data = u.ReadableToIterable(f, chunk_size, True)
 
             for i, data_chunk in enumerate(data):
-                self.assertEquals(chunk_size, len(data_chunk))
-                self.assertEquals(data_chunk, write_data[i] * chunk_size)
+                self.assertEqual(chunk_size, len(data_chunk))
+                self.assertEqual(data_chunk, write_data[i] * chunk_size)
 
-            self.assertEquals(actual_md5sum.hexdigest(), data.get_md5sum())
+            self.assertEqual(actual_md5sum.hexdigest(), data.get_md5sum())
 
     def test_md5_creation(self):
         # Check creation with a real and noop md5 class
         data = u.ReadableToIterable(None, None, md5=True)
-        self.assertEquals(md5().hexdigest(), data.get_md5sum())
+        self.assertEqual(md5().hexdigest(), data.get_md5sum())
         self.assertTrue(isinstance(data.md5sum, type(md5())))
 
         data = u.ReadableToIterable(None, None, md5=False)
-        self.assertEquals('', data.get_md5sum())
+        self.assertEqual('', data.get_md5sum())
         self.assertTrue(isinstance(data.md5sum, type(u.NoopMD5())))
 
     def test_unicode(self):
@@ -203,14 +210,14 @@ class TestReadableToIterable(testtools.TestCase):
             data = u.ReadableToIterable(f, chunk_size, True)
 
             x = next(data)
-            self.assertEquals(2, len(x))
-            self.assertEquals(unicode_data[:2], x)
+            self.assertEqual(2, len(x))
+            self.assertEqual(unicode_data[:2], x)
 
             x = next(data)
-            self.assertEquals(1, len(x))
-            self.assertEquals(unicode_data[2:], x)
+            self.assertEqual(1, len(x))
+            self.assertEqual(unicode_data[2:], x)
 
-            self.assertEquals(actual_md5sum, data.get_md5sum())
+            self.assertEqual(actual_md5sum, data.get_md5sum())
 
 
 class TestLengthWrapper(testtools.TestCase):

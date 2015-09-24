@@ -12,6 +12,9 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
+
 from concurrent.futures import as_completed, CancelledError, TimeoutError
 from copy import deepcopy
 from errno import EEXIST, ENOENT
@@ -29,10 +32,7 @@ from six.moves.queue import Empty as QueueEmpty
 from six.moves.urllib.parse import quote, unquote
 from six import Iterator, string_types
 
-try:
-    import simplejson as json
-except ImportError:
-    import json
+import json
 
 
 from swiftclient import Connection
@@ -40,10 +40,14 @@ from swiftclient.command_helpers import (
     stat_account, stat_container, stat_object
 )
 from swiftclient.utils import (
-    config_true_value, ReadableToIterable, LengthWrapper, EMPTY_ETAG
+    config_true_value, ReadableToIterable, LengthWrapper, EMPTY_ETAG,
+    parse_api_response, report_traceback
 )
 from swiftclient.exceptions import ClientException
 from swiftclient.multithreading import MultiThreadingManager
+
+
+logger = logging.getLogger("swiftclient.service")
 
 
 class ResultsIterator(Iterator):
@@ -164,6 +168,8 @@ _default_local_options = {
     'read_acl': None,
     'write_acl': None,
     'out_file': None,
+    'out_directory': None,
+    'remove_prefix': False,
     'no_download': False,
     'long': False,
     'totals': False,
@@ -175,7 +181,8 @@ _default_local_options = {
     'fail_fast': False,
     'human': False,
     'dir_marker': False,
-    'checksum': True
+    'checksum': True,
+    'shuffle': False
 }
 
 POLICY = 'X-Storage-Policy'
@@ -433,16 +440,24 @@ class SwiftService(object):
                     return res
                 except ClientException as err:
                     if err.http_status != 404:
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         res.update({
                             'success': False,
-                            'error': err
+                            'error': err,
+                            'traceback': traceback,
+                            'error_timestamp': err_time
                         })
                         return res
                     raise SwiftError('Account not found', exc=err)
                 except Exception as err:
+                    traceback, err_time = report_traceback()
+                    logger.exception(err)
                     res.update({
                         'success': False,
-                        'error': err
+                        'error': err,
+                        'traceback': traceback,
+                        'error_timestamp': err_time
                     })
                     return res
         else:
@@ -465,17 +480,25 @@ class SwiftService(object):
                     return res
                 except ClientException as err:
                     if err.http_status != 404:
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         res.update({
                             'success': False,
-                            'error': err
+                            'error': err,
+                            'traceback': traceback,
+                            'error_timestamp': err_time
                         })
                         return res
                     raise SwiftError('Container %r not found' % container,
                                      container=container, exc=err)
                 except Exception as err:
+                    traceback, err_time = report_traceback()
+                    logger.exception(err)
                     res.update({
                         'success': False,
-                        'error': err
+                        'error': err,
+                        'traceback': traceback,
+                        'error_timestamp': err_time
                     })
                     return res
             else:
@@ -504,9 +527,13 @@ class SwiftService(object):
             })
             return res
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
-                'error': err
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
             })
             return res
 
@@ -579,18 +606,26 @@ class SwiftService(object):
                     get_future_result(post)
                 except ClientException as err:
                     if err.http_status != 404:
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         res.update({
                             'success': False,
                             'error': err,
+                            'traceback': traceback,
+                            'error_timestamp': err_time,
                             'response_dict': response_dict
                         })
                         return res
-                    raise SwiftError('Account not found')
+                    raise SwiftError('Account not found', exc=err)
                 except Exception as err:
+                    traceback, err_time = report_traceback()
+                    logger.exception(err)
                     res.update({
                         'success': False,
                         'error': err,
-                        'response_dict': response_dict
+                        'response_dict': response_dict,
+                        'traceback': traceback,
+                        'error_timestamp': err_time
                     })
             return res
         if not objects:
@@ -617,23 +652,31 @@ class SwiftService(object):
                 get_future_result(post)
             except ClientException as err:
                 if err.http_status != 404:
+                    traceback, err_time = report_traceback()
+                    logger.exception(err)
                     res.update({
                         'action': 'post_container',
                         'success': False,
                         'error': err,
+                        'traceback': traceback,
+                        'error_timestamp': err_time,
                         'response_dict': response_dict
                     })
                     return res
                 raise SwiftError(
                     "Container '%s' not found" % container,
-                    container=container
+                    container=container, exc=err
                 )
             except Exception as err:
+                traceback, err_time = report_traceback()
+                logger.exception(err)
                 res.update({
                     'action': 'post_container',
                     'success': False,
                     'error': err,
-                    'response_dict': response_dict
+                    'response_dict': response_dict,
+                    'traceback': traceback,
+                    'error_timestamp': err_time
                 })
             return res
         else:
@@ -718,9 +761,13 @@ class SwiftService(object):
             conn.post_object(
                 container, obj, headers=headers, response_dict=result)
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
-                'error': err
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
             })
 
         return res
@@ -751,7 +798,7 @@ class SwiftService(object):
         else:
             options = self._options
 
-        rq = Queue()
+        rq = Queue(maxsize=10)  # Just stop list running away consuming memory
 
         if container is None:
             listing_future = self.thread_manager.container_pool.submit(
@@ -773,7 +820,6 @@ class SwiftService(object):
     @staticmethod
     def _list_account_job(conn, options, result_queue):
         marker = ''
-        success = True
         error = None
         try:
             while True:
@@ -802,23 +848,30 @@ class SwiftService(object):
 
                 marker = items[-1].get('name', items[-1].get('subdir'))
         except ClientException as err:
-            success = False
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             if err.http_status != 404:
-                error = err
+                error = (err, traceback, err_time)
             else:
-                error = SwiftError('Account not found')
+                error = (
+                    SwiftError('Account not found', exc=err),
+                    traceback, err_time
+                )
 
         except Exception as err:
-            success = False
-            error = err
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            error = (err, traceback, err_time)
 
         res = {
             'action': 'list_account_part',
             'container': None,
             'prefix': options['prefix'],
-            'success': success,
+            'success': False,
             'marker': marker,
-            'error': error,
+            'error': error[0],
+            'traceback': error[1],
+            'error_timestamp': error[2]
         }
         result_queue.put(res)
         result_queue.put(None)
@@ -826,7 +879,6 @@ class SwiftService(object):
     @staticmethod
     def _list_container_job(conn, container, options, result_queue):
         marker = ''
-        success = True
         error = None
         try:
             while True:
@@ -851,23 +903,33 @@ class SwiftService(object):
 
                 marker = items[-1].get('name', items[-1].get('subdir'))
         except ClientException as err:
-            success = False
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             if err.http_status != 404:
-                error = err
+                error = (err, traceback, err_time)
             else:
-                error = SwiftError('Container %r not found' % container,
-                                   container=container)
+                error = (
+                    SwiftError(
+                        'Container %r not found' % container,
+                        container=container, exc=err
+                    ),
+                    traceback,
+                    err_time
+                )
         except Exception as err:
-            success = False
-            error = err
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            error = (err, traceback, err_time)
 
         res = {
             'action': 'list_container_part',
             'container': container,
             'prefix': options['prefix'],
-            'success': success,
+            'success': False,
             'marker': marker,
-            'error': error,
+            'error': error[0],
+            'traceback': error[1],
+            'error_timestamp': error[2]
         }
         result_queue.put(res)
         result_queue.put(None)
@@ -891,7 +953,10 @@ class SwiftService(object):
                                 'no_download': False,
                                 'header': [],
                                 'skip_identical': False,
-                                'out_file': None
+                                'out_directory': None,
+                                'out_file': None,
+                                'remove_prefix': False,
+                                'shuffle' : False
                             }
 
         :returns: A generator for returning the results of the download
@@ -913,45 +978,26 @@ class SwiftService(object):
                 try:
                     options_copy = deepcopy(options)
                     options_copy["long"] = False
-                    containers = []
+
                     for part in self.list(options=options_copy):
                         if part["success"]:
-                            containers.extend([
-                                i['name'] for i in part["listing"]
-                            ])
+                            containers = [i['name'] for i in part["listing"]]
+
+                            if options['shuffle']:
+                                shuffle(containers)
+
+                            for con in containers:
+                                for res in self._download_container(
+                                        con, options_copy):
+                                    yield res
                         else:
                             raise part["error"]
-
-                    shuffle(containers)
-
-                    o_downs = []
-                    for con in containers:
-                        objs = []
-                        for part in self.list(
-                                container=con, options=options_copy):
-                            if part["success"]:
-                                objs.extend([
-                                    i['name'] for i in part["listing"]
-                                ])
-                            else:
-                                raise part["error"]
-                        shuffle(objs)
-
-                        o_downs.extend(
-                            self.thread_manager.object_dd_pool.submit(
-                                self._download_object_job, con, obj,
-                                options_copy
-                            ) for obj in objs
-                        )
-
-                    for o_down in interruptable_as_completed(o_downs):
-                        yield o_down.result()
 
                 # If we see a 404 here, the listing of the account failed
                 except ClientException as err:
                     if err.http_status != 404:
                         raise
-                    raise SwiftError('Account not found')
+                    raise SwiftError('Account not found', exc=err)
 
         elif not objects:
             if '/' in container:
@@ -976,8 +1022,7 @@ class SwiftService(object):
             for o_down in interruptable_as_completed(o_downs):
                 yield o_down.result()
 
-    @staticmethod
-    def _download_object_job(conn, container, obj, options):
+    def _download_object_job(self, conn, container, obj, options):
         out_file = options['out_file']
         results_dict = {}
 
@@ -986,7 +1031,16 @@ class SwiftService(object):
         pseudodir = False
         path = join(container, obj) if options['yes_all'] else obj
         path = path.lstrip(os_path_sep)
-        if options['skip_identical'] and out_file != '-':
+        options['skip_identical'] = (options['skip_identical'] and
+                                     out_file != '-')
+
+        if options['prefix'] and options['remove_prefix']:
+            path = path[len(options['prefix']):].lstrip('/')
+
+        if options['out_directory']:
+            path = os.path.join(options['out_directory'], path)
+
+        if options['skip_identical']:
             filename = out_file if out_file else path
             try:
                 fp = open(filename, 'rb')
@@ -1004,10 +1058,55 @@ class SwiftService(object):
 
         try:
             start_time = time()
-            headers, body = \
-                conn.get_object(container, obj, resp_chunk_size=65536,
-                                headers=req_headers,
-                                response_dict=results_dict)
+            get_args = {'resp_chunk_size': 65536,
+                        'headers': req_headers,
+                        'response_dict': results_dict}
+            if options['skip_identical']:
+                # Assume the file is a large object; if we're wrong, the query
+                # string is ignored and the If-None-Match header will trigger
+                # the behavior we want
+                get_args['query_string'] = 'multipart-manifest=get'
+
+            try:
+                headers, body = conn.get_object(container, obj, **get_args)
+            except ClientException as e:
+                if not options['skip_identical']:
+                    raise
+                if e.http_status != 304:  # Only handling Not Modified
+                    raise
+
+                headers = results_dict['headers']
+                if 'x-object-manifest' in headers:
+                    # DLO: most likely it has more than one page worth of
+                    #      segments and we have an empty file locally
+                    body = []
+                elif config_true_value(headers.get('x-static-large-object')):
+                    # SLO: apparently we have a copy of the manifest locally?
+                    #      provide no chunking data to force a fresh download
+                    body = [b'[]']
+                else:
+                    # Normal object: let it bubble up
+                    raise
+
+            if options['skip_identical']:
+                if config_true_value(headers.get('x-static-large-object')) or \
+                        'x-object-manifest' in headers:
+                    # The request was chunked, so stitch it back together
+                    chunk_data = self._get_chunk_data(conn, container, obj,
+                                                      headers, b''.join(body))
+                else:
+                    chunk_data = None
+
+                if chunk_data is not None:
+                    if self._is_identical(chunk_data, filename):
+                        raise ClientException('Large object is identical',
+                                              http_status=304)
+
+                    # Large objects are different; start the real download
+                    del get_args['query_string']
+                    get_args['response_dict'].clear()
+                    headers, body = conn.get_object(container, obj, **get_args)
+
             headers_receipt = time()
 
             obj_body = _SwiftReader(path, body, headers)
@@ -1084,12 +1183,16 @@ class SwiftService(object):
             return res
 
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res = {
                 'action': 'download_object',
                 'container': container,
                 'object': obj,
                 'success': False,
                 'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time,
                 'response_dict': results_dict,
                 'path': path,
                 'pseudodir': pseudodir,
@@ -1097,14 +1200,17 @@ class SwiftService(object):
             }
             return res
 
-    def _download_container(self, container, options):
+    def _submit_page_downloads(self, container, page_generator, options):
         try:
-            objects = []
-            for part in self.list(container=container, options=options):
-                if part["success"]:
-                    objects.extend([o["name"] for o in part["listing"]])
-                else:
-                    raise part["error"]
+            list_page = next(page_generator)
+        except StopIteration:
+            return None
+
+        if list_page["success"]:
+            objects = [o["name"] for o in list_page["listing"]]
+
+            if options["shuffle"]:
+                shuffle(objects)
 
             o_downs = [
                 self.thread_manager.object_dd_pool.submit(
@@ -1112,14 +1218,62 @@ class SwiftService(object):
                 ) for obj in objects
             ]
 
-            for o_down in interruptable_as_completed(o_downs):
-                yield o_down.result()
+            return o_downs
+        else:
+            raise list_page["error"]
 
+    def _download_container(self, container, options):
+        _page_generator = self.list(container=container, options=options)
+        try:
+            next_page_downs = self._submit_page_downloads(
+                container, _page_generator, options
+            )
         except ClientException as err:
             if err.http_status != 404:
                 raise
-            raise SwiftError('Container %r not found' % container,
-                             container=container)
+            raise SwiftError(
+                'Container %r not found' % container,
+                container=container, exc=err
+            )
+
+        error = None
+        while next_page_downs:
+            page_downs = next_page_downs
+            next_page_downs = None
+
+            # Start downloading the next page of list results when
+            # we have completed 80% of the previous page
+            next_page_triggered = False
+            next_page_trigger_point = 0.8 * len(page_downs)
+
+            page_results_yielded = 0
+            for o_down in interruptable_as_completed(page_downs):
+                yield o_down.result()
+
+                # Do we need to start the next set of downloads yet?
+                if not next_page_triggered:
+                    page_results_yielded += 1
+                    if page_results_yielded >= next_page_trigger_point:
+                        try:
+                            next_page_downs = self._submit_page_downloads(
+                                container, _page_generator, options
+                            )
+                        except ClientException as err:
+                            # Allow the current page to finish downloading
+                            logger.exception(err)
+                            error = err
+                        except Exception:
+                            # Something unexpected went wrong - cancel
+                            # remaining downloads
+                            for _d in page_downs:
+                                _d.cancel()
+                            raise
+                        finally:
+                            # Stop counting and testing
+                            next_page_triggered = True
+
+        if error:
+            raise error
 
     # Upload related methods
     #
@@ -1157,10 +1311,10 @@ class SwiftService(object):
 
                             {
                                 'meta': [],
-                                'headers': [],
+                                'header': [],
                                 'segment_size': None,
                                 'use_slo': False,
-                                'segment_container: None,
+                                'segment_container': None,
                                 'leave_segments': False,
                                 'changed': None,
                                 'skip_identical': False,
@@ -1280,12 +1434,16 @@ class SwiftService(object):
                         file_jobs[file_future] = details
                     except OSError as err:
                         # Avoid tying up threads with jobs that will fail
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         res = {
                             'action': 'upload_object',
                             'container': container,
                             'object': o,
                             'success': False,
                             'error': err,
+                            'traceback': traceback,
+                            'error_timestamp': err_time,
                             'path': s
                         }
                         rq.put(res)
@@ -1384,9 +1542,13 @@ class SwiftService(object):
                 'response_dict': create_response
             })
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
                 'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time,
                 'response_dict': create_response
             })
         return res
@@ -1425,9 +1587,14 @@ class SwiftService(object):
                     return res
             except ClientException as err:
                 if err.http_status != 404:
+                    traceback, err_time = report_traceback()
+                    logger.exception(err)
                     res.update({
                         'success': False,
-                        'error': err})
+                        'error': err,
+                        'traceback': traceback,
+                        'error_timestamp': err_time
+                    })
                     return res
         try:
             conn.put_object(container, obj, '', content_length=0,
@@ -1439,9 +1606,13 @@ class SwiftService(object):
                 'response_dict': results_dict})
             return res
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
                 'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time,
                 'response_dict': results_dict})
             return res
 
@@ -1494,9 +1665,13 @@ class SwiftService(object):
             return res
 
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
                 'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time,
                 'response_dict': results_dict,
                 'attempts': conn.attempts
             })
@@ -1505,8 +1680,59 @@ class SwiftService(object):
                 results_queue.put(res)
             return res
 
+    def _get_chunk_data(self, conn, container, obj, headers, manifest=None):
+        chunks = []
+        if 'x-object-manifest' in headers:
+            scontainer, sprefix = headers['x-object-manifest'].split('/', 1)
+            for part in self.list(scontainer, {'prefix': sprefix}):
+                if part["success"]:
+                    chunks.extend(part["listing"])
+                else:
+                    raise part["error"]
+        elif config_true_value(headers.get('x-static-large-object')):
+            if manifest is None:
+                headers, manifest = conn.get_object(
+                    container, obj, query_string='multipart-manifest=get')
+            manifest = parse_api_response(headers, manifest)
+            for chunk in manifest:
+                if chunk.get('sub_slo'):
+                    scont, sobj = chunk['name'].lstrip('/').split('/', 1)
+                    chunks.extend(self._get_chunk_data(
+                        conn, scont, sobj, {'x-static-large-object': True}))
+                else:
+                    chunks.append(chunk)
+        else:
+            chunks.append({'hash': headers.get('etag').strip('"'),
+                           'bytes': int(headers.get('content-length'))})
+        return chunks
+
+    def _is_identical(self, chunk_data, path):
+        try:
+            fp = open(path, 'rb')
+        except IOError:
+            return False
+
+        with fp:
+            for chunk in chunk_data:
+                to_read = chunk['bytes']
+                md5sum = md5()
+                while to_read:
+                    data = fp.read(min(65536, to_read))
+                    if not data:
+                        return False
+                    md5sum.update(data)
+                    to_read -= len(data)
+                if md5sum.hexdigest() != chunk['hash']:
+                    return False
+            # Each chunk is verified; check that we're at the end of the file
+            return not fp.read(1)
+
     def _upload_object_job(self, conn, container, source, obj, options,
                            results_queue=None):
+        if obj.startswith('./') or obj.startswith('.\\'):
+            obj = obj[2:]
+        if obj.startswith('/'):
+            obj = obj[1:]
         res = {
             'action': 'upload_object',
             'container': container,
@@ -1519,10 +1745,6 @@ class SwiftService(object):
             path = source
         res['path'] = path
         try:
-            if obj.startswith('./') or obj.startswith('.\\'):
-                obj = obj[2:]
-            if obj.startswith('/'):
-                obj = obj[1:]
             if path is not None:
                 put_headers = {'x-object-meta-mtime': "%f" % getmtime(path)}
             else:
@@ -1536,32 +1758,27 @@ class SwiftService(object):
             old_manifest = None
             old_slo_manifest_paths = []
             new_slo_manifest_paths = set()
+            segment_size = int(0 if options['segment_size'] is None
+                               else options['segment_size'])
             if (options['changed'] or options['skip_identical']
                     or not options['leave_segments']):
-                checksum = None
-                if options['skip_identical']:
-                    try:
-                        fp = open(path, 'rb')
-                    except IOError:
-                        pass
-                    else:
-                        with fp:
-                            md5sum = md5()
-                            while True:
-                                data = fp.read(65536)
-                                if not data:
-                                    break
-                                md5sum.update(data)
-                        checksum = md5sum.hexdigest()
                 try:
                     headers = conn.head_object(container, obj)
-                    if options['skip_identical'] and checksum is not None:
-                        if checksum == headers.get('etag'):
-                            res.update({
-                                'success': True,
-                                'status': 'skipped-identical'
-                            })
-                            return res
+                    is_slo = config_true_value(
+                        headers.get('x-static-large-object'))
+
+                    if options['skip_identical'] or (
+                            is_slo and not options['leave_segments']):
+                        chunk_data = self._get_chunk_data(
+                            conn, container, obj, headers)
+
+                    if options['skip_identical'] and self._is_identical(
+                            chunk_data, path):
+                        res.update({
+                            'success': True,
+                            'status': 'skipped-identical'
+                        })
+                        return res
 
                     cl = int(headers.get('content-length'))
                     mt = headers.get('x-object-meta-mtime')
@@ -1575,22 +1792,21 @@ class SwiftService(object):
                         return res
                     if not options['leave_segments']:
                         old_manifest = headers.get('x-object-manifest')
-                        if config_true_value(
-                                headers.get('x-static-large-object')):
-                            headers, manifest_data = conn.get_object(
-                                container, obj,
-                                query_string='multipart-manifest=get'
-                            )
-                            for old_seg in json.loads(manifest_data):
+                        if is_slo:
+                            for old_seg in chunk_data:
                                 seg_path = old_seg['name'].lstrip('/')
                                 if isinstance(seg_path, text_type):
                                     seg_path = seg_path.encode('utf-8')
                                 old_slo_manifest_paths.append(seg_path)
                 except ClientException as err:
                     if err.http_status != 404:
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         res.update({
                             'success': False,
-                            'error': err
+                            'error': err,
+                            'traceback': traceback,
+                            'error_timestamp': err_time
                         })
                         return res
 
@@ -1601,8 +1817,8 @@ class SwiftService(object):
             # a segment job if we're reading from a stream - we may fail if we
             # go over the single object limit, but this gives us a nice way
             # to create objects from memory
-            if (path is not None and options['segment_size']
-                    and (getsize(path) > int(options['segment_size']))):
+            if (path is not None and segment_size
+                    and (getsize(path) > segment_size)):
                 res['large_object'] = True
                 seg_container = container + '_segments'
                 if options['segment_container']:
@@ -1615,7 +1831,6 @@ class SwiftService(object):
                 segment_start = 0
 
                 while segment_start < full_size:
-                    segment_size = int(options['segment_size'])
                     if segment_start + segment_size > full_size:
                         segment_size = full_size - segment_start
                     if options['use_slo']:
@@ -1646,9 +1861,11 @@ class SwiftService(object):
                         if not r['success']:
                             errors = True
                         segment_results.append(r)
-                    except Exception as e:
+                    except Exception as err:
+                        traceback, err_time = report_traceback()
+                        logger.exception(err)
                         errors = True
-                        exceptions.append(e)
+                        exceptions.append((err, traceback, err_time))
                 if errors:
                     err = ClientException(
                         'Aborting manifest creation '
@@ -1734,19 +1951,19 @@ class SwiftService(object):
 
             if old_manifest or old_slo_manifest_paths:
                 drs = []
+                delobjsmap = {}
                 if old_manifest:
                     scontainer, sprefix = old_manifest.split('/', 1)
                     scontainer = unquote(scontainer)
                     sprefix = unquote(sprefix).rstrip('/') + '/'
-                    delobjs = []
-                    for delobj in conn.get_container(scontainer,
-                                                     prefix=sprefix)[1]:
-                        delobjs.append(delobj['name'])
-                    for dr in self.delete(container=scontainer,
-                                          objects=delobjs):
-                        drs.append(dr)
+                    delobjsmap[scontainer] = []
+                    for part in self.list(scontainer, {'prefix': sprefix}):
+                        if not part["success"]:
+                            raise part["error"]
+                        delobjsmap[scontainer].extend(
+                            seg['name'] for seg in part['listing'])
+
                 if old_slo_manifest_paths:
-                    delobjsmap = {}
                     for seg_to_delete in old_slo_manifest_paths:
                         if seg_to_delete in new_slo_manifest_paths:
                             continue
@@ -1755,10 +1972,18 @@ class SwiftService(object):
                         delobjs_cont = delobjsmap.get(scont, [])
                         delobjs_cont.append(sobj)
                         delobjsmap[scont] = delobjs_cont
-                    for (dscont, dsobjs) in delobjsmap.items():
-                        for dr in self.delete(container=dscont,
-                                              objects=dsobjs):
-                            drs.append(dr)
+
+                del_segs = []
+                for dscont, dsobjs in delobjsmap.items():
+                    for dsobj in dsobjs:
+                        del_seg = self.thread_manager.segment_pool.submit(
+                            self._delete_segment, dscont, dsobj,
+                            results_queue=results_queue
+                        )
+                        del_segs.append(del_seg)
+
+                for del_seg in interruptable_as_completed(del_segs):
+                    drs.append(del_seg.result())
                 res['segment_delete_results'] = drs
 
             # return dict for printing
@@ -1769,16 +1994,26 @@ class SwiftService(object):
             return res
 
         except OSError as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             if err.errno == ENOENT:
-                err = SwiftError('Local file %r not found' % path)
+                error = SwiftError('Local file %r not found' % path, exc=err)
+            else:
+                error = err
             res.update({
                 'success': False,
-                'error': err
+                'error': error,
+                'traceback': traceback,
+                'error_timestamp': err_time
             })
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             res.update({
                 'success': False,
-                'error': err
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
             })
         return res
 
@@ -1877,8 +2112,15 @@ class SwiftService(object):
         try:
             conn.delete_object(container, obj, response_dict=results_dict)
             res = {'success': True}
-        except Exception as e:
-            res = {'success': False, 'error': e}
+        except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            res = {
+                'success': False,
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
+            }
 
         res.update({
             'action': 'delete_segment',
@@ -1894,12 +2136,12 @@ class SwiftService(object):
 
     def _delete_object(self, conn, container, obj, options,
                        results_queue=None):
+        res = {
+            'action': 'delete_object',
+            'container': container,
+            'object': obj
+        }
         try:
-            res = {
-                'action': 'delete_object',
-                'container': container,
-                'object': obj
-            }
             old_manifest = None
             query_string = None
 
@@ -1954,8 +2196,14 @@ class SwiftService(object):
             })
 
         except Exception as err:
-            res['success'] = False
-            res['error'] = err
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            res.update({
+                'success': False,
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
+            })
             return res
 
         return res
@@ -1966,8 +2214,15 @@ class SwiftService(object):
         try:
             conn.delete_container(container, response_dict=results_dict)
             res = {'success': True}
-        except Exception as e:
-            res = {'success': False, 'error': e}
+        except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            res = {
+                'success': False,
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
+            }
 
         res.update({
             'action': 'delete_container',
@@ -1980,16 +2235,17 @@ class SwiftService(object):
 
     def _delete_container(self, container, options):
         try:
-            objs = []
             for part in self.list(container=container):
                 if part["success"]:
-                    objs.extend([o['name'] for o in part['listing']])
+                    objs = [o['name'] for o in part['listing']]
+
+                    o_dels = self.delete(
+                        container=container, objects=objs, options=options
+                    )
+                    for res in o_dels:
+                        yield res
                 else:
                     raise part["error"]
-
-            for res in self.delete(
-                    container=container, objects=objs, options=options):
-                yield res
 
             con_del = self.thread_manager.container_pool.submit(
                 self._delete_empty_container, container
@@ -1997,12 +2253,16 @@ class SwiftService(object):
             con_del_res = get_future_result(con_del)
 
         except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
             con_del_res = {
                 'action': 'delete_container',
                 'container': container,
                 'object': None,
                 'success': False,
-                'error': err
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
             }
 
         yield con_del_res
@@ -2040,7 +2300,7 @@ class SwiftService(object):
         except ClientException as err:
             if err.http_status != 404:
                 raise err
-            raise SwiftError('Account not found')
+            raise SwiftError('Account not found', exc=err)
 
         return res
 
@@ -2075,10 +2335,16 @@ class SwiftService(object):
                 res['status'] = 'cancelled'
                 result_queue.put(res)
             except Exception as err:
+                traceback, err_time = report_traceback()
+                logger.exception(err)
                 details = futures[f]
                 res = details
-                res['success'] = False
-                res['error'] = err
+                res.update({
+                    'success': False,
+                    'error': err,
+                    'traceback': traceback,
+                    'error_timestamp': err_time
+                })
                 result_queue.put(res)
 
         result_queue.put(None)
