@@ -1,4 +1,4 @@
-python-swiftclient (1:2.6.0-1) UNRELEASED; urgency=medium
+python-swiftclient (1:2.6.0-1) experimental; urgency=medium
 
   * New upstream release.
   * d/control: Align dependencies and versions with upstream.
