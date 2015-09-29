@@ -1,7 +1,11 @@
 python-swiftclient (1:2.6.0-2) UNRELEASED; urgency=medium
 
+  [ Ivan Udovichenko ]
   * d/control: Remove unnecessary dependency - python-simplejson [1].
     [1] Commit: 317df7e527c174695e184f8250f5f743ac91f0f2
+
+  [ James Page ]
+  * d/py3dist-overrides: Ignore futures requirement for py3.
 
  -- Ivan Udovichenko <iudovichenko@mirantis.com>  Mon, 28 Sep 2015 20:10:24 +0300
 
