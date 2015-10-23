@@ -22,6 +22,9 @@ override_dh_install:
 	mv $(CURDIR)/debian/python3-swiftclient/usr/bin/swift $(CURDIR)/debian/python3-swiftclient/usr/bin/python3-swift
 	rm -rf $(CURDIR)/debian/python*-swiftclient/usr/share/man
 
+override_dh_python3:
+	dh_python3 --shebang=/usr/bin/python3
+
 override_dh_auto_clean:
 	dh_auto_clean
 	rm -rf build .testrepository
