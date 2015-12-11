@@ -1,3 +1,9 @@
+python-swiftclient (1:2.7.0-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Ondřej Nový <novy@ondrej.org>  Fri, 11 Dec 2015 17:12:55 +0100
+
 python-swiftclient (1:2.6.0-3) unstable; urgency=medium
 
   * override_dh_python3 to fix Py3 shebang.
