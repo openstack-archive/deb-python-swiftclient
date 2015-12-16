@@ -43,7 +43,6 @@ Package: python-swiftclient
 Architecture: all
 Depends: python-concurrent.futures,
          python-keystoneclient,
-         python-pbr,
          python-pkg-resources,
          python-requests,
          python-six,
@@ -77,7 +76,6 @@ Description: Client library for Openstack Swift API - Python 2.7
 Package: python3-swiftclient
 Architecture: all
 Depends: python3-keystoneclient,
-         python3-pbr,
          python3-requests,
          python3-pkg-resources,
          python3-six,
