@@ -24,7 +24,7 @@ import warnings
 from distutils.version import StrictVersion
 from requests.exceptions import RequestException, SSLError
 from six.moves import http_client
-from six.moves.urllib.parse import quote as _quote
+from six.moves.urllib.parse import quote as _quote, unquote
 from six.moves.urllib.parse import urlparse, urlunparse
 from time import sleep, time
 import six
@@ -46,6 +46,7 @@ USER_METADATA_TYPE = tuple('x-%s-meta-' % type_ for type_ in
 try:
     from logging import NullHandler
 except ImportError:
+    # Added in Python 2.7
     class NullHandler(logging.Handler):
         def handle(self, record):
             pass
@@ -103,6 +104,36 @@ def http_log(args, kwargs, resp, body):
         log_method("RESP BODY: %s", body)
 
 
+def parse_header_string(data):
+    if six.PY2:
+        if isinstance(data, six.text_type):
+            # Under Python2 requests only returns binary_type, but if we get
+            # some stray text_type input, this should prevent unquote from
+            # interpretting %-encoded data as raw code-points.
+            data = data.encode('utf8')
+        try:
+            unquoted = unquote(data).decode('utf8')
+        except UnicodeDecodeError:
+            try:
+                return data.decode('utf8')
+            except UnicodeDecodeError:
+                return quote(data).decode('utf8')
+    else:
+        if isinstance(data, six.binary_type):
+            # Under Python3 requests only returns text_type and tosses (!) the
+            # rest of the headers. If that ever changes, this should be a sane
+            # approach.
+            try:
+                data = data.decode('ascii')
+            except UnicodeDecodeError:
+                data = quote(data)
+        try:
+            unquoted = unquote(data, errors='strict')
+        except UnicodeDecodeError:
+            return data
+    return unquoted
+
+
 def quote(value, safe='/'):
     """
     Patched version of urllib.quote that encodes utf8 strings before quoting.
@@ -110,11 +141,7 @@ def quote(value, safe='/'):
     """
     if six.PY3:
         return _quote(value, safe=safe)
-    value = encode_utf8(value)
-    if isinstance(value, bytes):
-        return _quote(value, safe)
-    else:
-        return value
+    return _quote(encode_utf8(value), safe)
 
 
 def encode_utf8(value):
@@ -472,6 +499,14 @@ def get_auth(auth_url, user, key, **kwargs):
         return storage_url, token
 
 
+def resp_header_dict(resp):
+    resp_headers = {}
+    for header, value in resp.getheaders():
+        header = parse_header_string(header).lower()
+        resp_headers[header] = parse_header_string(value)
+    return resp_headers
+
+
 def store_response(resp, response_dict):
     """
     store information about an operation into a dict
@@ -482,13 +517,9 @@ def store_response(resp, response_dict):
        status, reason and a dict of lower-cased headers
     """
     if response_dict is not None:
-        resp_headers = {}
-        for header, value in resp.getheaders():
-            resp_headers[header.lower()] = value
-
         response_dict['status'] = resp.status
         response_dict['reason'] = resp.reason
-        response_dict['headers'] = resp_headers
+        response_dict['headers'] = resp_header_dict(resp)
 
 
 def get_account(url, token, marker=None, limit=None, prefix=None,
@@ -545,9 +576,7 @@ def get_account(url, token, marker=None, limit=None, prefix=None,
     body = resp.read()
     http_log(("%s?%s" % (url, qs), method,), {'headers': headers}, resp, body)
 
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     if resp.status < 200 or resp.status >= 300:
         raise ClientException('Account GET failed', http_scheme=parsed.scheme,
                               http_host=conn.host, http_path=parsed.path,
@@ -589,9 +618,7 @@ def head_account(url, token, http_conn=None, service_token=None):
                               http_host=conn.host, http_path=parsed.path,
                               http_status=resp.status, http_reason=resp.reason,
                               http_response_content=body)
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     return resp_headers
 
 
@@ -638,7 +665,7 @@ def post_account(url, token, headers, http_conn=None, response_dict=None,
 def get_container(url, token, container, marker=None, limit=None,
                   prefix=None, delimiter=None, end_marker=None,
                   path=None, http_conn=None,
-                  full_listing=False, service_token=None):
+                  full_listing=False, service_token=None, headers=None):
     """
     Get a listing of objects for the container.
 
@@ -656,16 +683,22 @@ def get_container(url, token, container, marker=None, limit=None,
     :param full_listing: if True, return a full listing, else returns a max
                          of 10000 listings
     :param service_token: service auth token
+    :param headers: additional headers to include in the request
     :returns: a tuple of (response headers, a list of objects) The response
               headers will be a dict and all header names will be lowercase.
     :raises ClientException: HTTP GET request failed
     """
     if not http_conn:
         http_conn = http_connection(url)
+    if headers:
+        headers = dict(headers)
+    else:
+        headers = {}
+    headers['X-Auth-Token'] = token
     if full_listing:
         rv = get_container(url, token, container, marker, limit, prefix,
                            delimiter, end_marker, path, http_conn,
-                           service_token)
+                           service_token, headers=headers)
         listing = rv[1]
         while listing:
             if not delimiter:
@@ -674,7 +707,8 @@ def get_container(url, token, container, marker=None, limit=None,
                 marker = listing[-1].get('name', listing[-1].get('subdir'))
             listing = get_container(url, token, container, marker, limit,
                                     prefix, delimiter, end_marker, path,
-                                    http_conn, service_token)[1]
+                                    http_conn, service_token,
+                                    headers=headers)[1]
             if listing:
                 rv[1].extend(listing)
         return rv
@@ -693,7 +727,6 @@ def get_container(url, token, container, marker=None, limit=None,
         qs += '&end_marker=%s' % quote(end_marker)
     if path:
         qs += '&path=%s' % quote(path)
-    headers = {'X-Auth-Token': token}
     if service_token:
         headers['X-Service-Token'] = service_token
     method = 'GET'
@@ -712,9 +745,7 @@ def get_container(url, token, container, marker=None, limit=None,
                               http_path=cont_path, http_query=qs,
                               http_status=resp.status, http_reason=resp.reason,
                               http_response_content=body)
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     if resp.status == 204:
         return resp_headers, []
     return resp_headers, parse_api_response(resp_headers, body)
@@ -730,6 +761,7 @@ def head_container(url, token, container, http_conn=None, headers=None,
     :param container: container name to get stats for
     :param http_conn: HTTP connection object (If None, it will create the
                       conn object)
+    :param headers: additional headers to include in the request
     :param service_token: service auth token
     :returns: a dict containing the response's headers (all header names will
               be lowercase)
@@ -758,9 +790,7 @@ def head_container(url, token, container, http_conn=None, headers=None,
                               http_path=path, http_status=resp.status,
                               http_reason=resp.reason,
                               http_response_content=body)
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     return resp_headers
 
 
@@ -958,7 +988,7 @@ def get_object(url, token, container, name, http_conn=None,
 
 
 def head_object(url, token, container, name, http_conn=None,
-                service_token=None):
+                service_token=None, headers=None):
     """
     Get object info
 
@@ -969,6 +999,7 @@ def head_object(url, token, container, name, http_conn=None,
     :param http_conn: HTTP connection object (If None, it will create the
                       conn object)
     :param service_token: service auth token
+    :param headers: additional headers to include in the request
     :returns: a dict containing the response's headers (all header names will
               be lowercase)
     :raises ClientException: HTTP HEAD request failed
@@ -978,8 +1009,12 @@ def head_object(url, token, container, name, http_conn=None,
     else:
         parsed, conn = http_connection(url)
     path = '%s/%s/%s' % (parsed.path, quote(container), quote(name))
+    if headers:
+        headers = dict(headers)
+    else:
+        headers = {}
+    headers['X-Auth-Token'] = token
     method = 'HEAD'
-    headers = {'X-Auth-Token': token}
     if service_token:
         headers['X-Service-Token'] = service_token
     conn.request(method, path, '', headers)
@@ -992,9 +1027,7 @@ def head_object(url, token, container, name, http_conn=None,
                               http_host=conn.host, http_path=path,
                               http_status=resp.status, http_reason=resp.reason,
                               http_response_content=body)
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     return resp_headers
 
 
@@ -1011,7 +1044,7 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                       container name is expected to be part of the url
     :param name: object name to put; if None, the object name is expected to be
                  part of the url
-    :param contents: a string, a file like object or an iterable
+    :param contents: a string, a file-like object or an iterable
                      to read object data from;
                      if None, a zero-byte put will be done
     :param content_length: value to send as content-length header; also limits
@@ -1022,8 +1055,11 @@ def put_object(url, token=None, container=None, name=None, contents=None,
     :param chunk_size: chunk size of data to write; it defaults to 65536;
                        used only if the contents object has a 'read'
                        method, e.g. file-like objects, ignored otherwise
-    :param content_type: value to send as content-type header; if None, an
-                         empty string value will be sent
+
+    :param content_type: value to send as content-type header, overriding any
+                       value included in the headers param; if None and no
+                       value is found in the headers param, an empty string
+                       value will be sent
     :param headers: additional headers to include in the request, if any
     :param http_conn: HTTP connection object (If None, it will create the
                       conn object)
@@ -1065,7 +1101,8 @@ def put_object(url, token=None, container=None, name=None, contents=None,
                 content_length = int(v)
     if content_type is not None:
         headers['Content-Type'] = content_type
-    else:  # python-requests sets application/x-www-form-urlencoded otherwise
+    elif 'Content-Type' not in headers:
+        # python-requests sets application/x-www-form-urlencoded otherwise
         headers['Content-Type'] = ''
     if not contents:
         headers['Content-Length'] = '0'
@@ -1224,9 +1261,7 @@ def get_capabilities(http_conn):
                               http_host=conn.host, http_path=parsed.path,
                               http_status=resp.status, http_reason=resp.reason,
                               http_response_content=body)
-    resp_headers = {}
-    for header, value in resp.getheaders():
-        resp_headers[header.lower()] = value
+    resp_headers = resp_header_dict(resp)
     return parse_api_response(resp_headers, body)
 
 
@@ -1400,7 +1435,7 @@ class Connection(object):
                 self.http_conn = None
             except ClientException as err:
                 self._add_response_dict(caller_response_dict, kwargs)
-                if self.attempts > self.retries:
+                if self.attempts > self.retries or err.http_status is None:
                     logger.exception(err)
                     raise
                 if err.http_status == 401:
@@ -1444,13 +1479,13 @@ class Connection(object):
         return self._retry(None, post_account, headers,
                            response_dict=response_dict)
 
-    def head_container(self, container):
+    def head_container(self, container, headers=None):
         """Wrapper for :func:`head_container`"""
-        return self._retry(None, head_container, container)
+        return self._retry(None, head_container, container, headers=headers)
 
     def get_container(self, container, marker=None, limit=None, prefix=None,
                       delimiter=None, end_marker=None, path=None,
-                      full_listing=False):
+                      full_listing=False, headers=None):
         """Wrapper for :func:`get_container`"""
         # TODO(unknown): With full_listing=True this will restart the entire
         # listing with each retry. Need to make a better version that just
@@ -1458,7 +1493,7 @@ class Connection(object):
         return self._retry(None, get_container, container, marker=marker,
                            limit=limit, prefix=prefix, delimiter=delimiter,
                            end_marker=end_marker, path=path,
-                           full_listing=full_listing)
+                           full_listing=full_listing, headers=headers)
 
     def put_container(self, container, headers=None, response_dict=None):
         """Wrapper for :func:`put_container`"""
@@ -1475,9 +1510,9 @@ class Connection(object):
         return self._retry(None, delete_container, container,
                            response_dict=response_dict)
 
-    def head_object(self, container, obj):
+    def head_object(self, container, obj, headers=None):
         """Wrapper for :func:`head_object`"""
-        return self._retry(None, head_object, container, obj)
+        return self._retry(None, head_object, container, obj, headers=headers)
 
     def get_object(self, container, obj, resp_chunk_size=None,
                    query_string=None, response_dict=None, headers=None):

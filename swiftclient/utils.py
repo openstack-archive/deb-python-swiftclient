@@ -35,34 +35,30 @@ def config_true_value(value):
         (isinstance(value, six.string_types) and value.lower() in TRUE_VALUES)
 
 
-def prt_bytes(bytes, human_flag):
+def prt_bytes(num_bytes, human_flag):
     """
     convert a number > 1024 to printable format, either in 4 char -h format as
     with ls -lh or return as 12 char right justified string
     """
 
-    if human_flag:
-        suffix = ''
-        mods = list('KMGTPEZY')
-        temp = float(bytes)
-        if temp > 0:
-            while temp > 1023:
-                try:
-                    suffix = mods.pop(0)
-                except IndexError:
-                    break
-                temp /= 1024.0
-            if suffix != '':
-                if temp >= 10:
-                    bytes = '%3d%s' % (temp, suffix)
-                else:
-                    bytes = '%.1f%s' % (temp, suffix)
-        if suffix == '':    # must be < 1024
-            bytes = '%4s' % bytes
-    else:
-        bytes = '%12s' % bytes
+    if not human_flag:
+        return '%12s' % num_bytes
 
-    return bytes
+    num = float(num_bytes)
+    suffixes = [None] + list('KMGTPEZY')
+    for suffix in suffixes[:-1]:
+        if num <= 1023:
+            break
+        num /= 1024.0
+    else:
+        suffix = suffixes[-1]
+
+    if not suffix:  # num_bytes must be < 1024
+        return '%4s' % num_bytes
+    elif num >= 10:
+        return '%3d%s' % (num, suffix)
+    else:
+        return '%.1f%s' % (num, suffix)
 
 
 def generate_temp_url(path, seconds, key, method, absolute=False):
@@ -70,14 +66,14 @@ def generate_temp_url(path, seconds, key, method, absolute=False):
     Swift object.
 
     :param path: The full path to the Swift object. Example:
-    /v1/AUTH_account/c/o.
+        /v1/AUTH_account/c/o.
     :param seconds: The amount of time in seconds the temporary URL will
-    be valid for.
-    :param key: The secret temporary URL key set on the Swift cluster.
-    To set a key, run 'swift post -m
-    "Temp-URL-Key:b3968d0207b54ece87cccc06515a89d4"'
-    :param method: A HTTP method, typically either GET or PUT, to allow for
-    this temporary URL.
+        be valid for.
+    :param key: The secret temporary URL key set on the Swift
+        cluster. To set a key, run 'swift post -m
+        "Temp-URL-Key: <substitute tempurl key here>"'
+    :param method: A HTTP method, typically either GET or PUT, to allow
+        for this temporary URL.
     :raises: ValueError if seconds is not a positive integer
     :raises: TypeError if seconds is not an integer
     :return: the path portion of a temporary URL
@@ -152,7 +148,7 @@ class ReadableToIterable(object):
     Wrap a filelike object and act as an iterator.
 
     It is recommended to use this class only on files opened in binary mode.
-    Due to the Unicode changes in python 3 files are now opened using an
+    Due to the Unicode changes in Python 3, files are now opened using an
     encoding not suitable for use with the md5 class and because of this
     hit the exception on every call to next. This could cause problems,
     especially with large files and small chunk sizes.
@@ -200,7 +196,7 @@ class LengthWrapper(object):
     """
     Wrap a filelike object with a maximum length.
 
-    Fix for https://github.com/kennethreitz/requests/issues/1648
+    Fix for https://github.com/kennethreitz/requests/issues/1648.
     It is recommended to use this class only on files opened in binary mode.
     """
     def __init__(self, readable, length, md5=False):

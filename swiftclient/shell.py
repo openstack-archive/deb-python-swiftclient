@@ -51,18 +51,18 @@ def immediate_exit(signum, frame):
     stderr.write(" Aborted\n")
     os_exit(2)
 
-st_delete_options = '''[-all] [--leave-segments]
+st_delete_options = '''[--all] [--leave-segments]
                     [--object-threads <threads>]
                     [--container-threads <threads>]
-                    <container> [object]
+                    [<container>] [<object>] [...]
 '''
 
 st_delete_help = '''
 Delete a container or objects within a container.
 
 Positional arguments:
-  <container>           Name of container to delete from.
-  [object]              Name of object to delete. Specify multiple times
+  [<container>]         Name of container to delete from.
+  [<object>]            Name of object to delete. Specify multiple times
                         for multiple objects.
 
 Optional arguments:
@@ -156,7 +156,7 @@ st_download_options = '''[--all] [--marker] [--prefix <prefix>]
                       [--object-threads <threads>]
                       [--container-threads <threads>] [--no-download]
                       [--skip-identical] [--remove-prefix]
-                      [--header <header:value>]
+                      [--header <header:value>] [--no-shuffle]
                       <container> <object>
 '''
 
@@ -376,7 +376,7 @@ def st_download(parser, args, output_manager):
 
 
 st_list_options = '''[--long] [--lh] [--totals] [--prefix <prefix>]
-                  [--delimiter <delimiter>]
+                  [--delimiter <delimiter>] [container]
 '''
 
 st_list_help = '''
@@ -390,8 +390,10 @@ Optional arguments:
   --lh                  Report sizes in human readable format similar to
                         ls -lh.
   -t, --totals          Used with -l or --lh, only report totals.
-  -p, --prefix          Only list items beginning with the prefix.
-  -d, --delimiter       Roll up items with the given delimiter. For containers
+  -p <prefix>, --prefix <prefix>
+                        Only list items beginning with the prefix.
+  -d <delim>, --delimiter <delim>
+                        Roll up items with the given delimiter. For containers
                         only. See OpenStack Swift API documentation for what
                         this means.
 '''.strip('\n')
@@ -424,6 +426,7 @@ def st_list(parser, args, output_manager):
                             datestamp, item_name)
                 else:    # list container contents
                     subdir = item.get('subdir')
+                    content_type = item.get('content_type')
                     if subdir is None:
                         item_bytes = item.get('bytes')
                         byte_str = prt_bytes(item_bytes, options.human)
@@ -436,7 +439,8 @@ def st_list(parser, args, output_manager):
                         item_name = subdir
                     if not options.totals:
                         output_manager.print_msg(
-                            "%s %10s %8s %s", byte_str, date, xtime, item_name)
+                            "%s %10s %8s %24s %s",
+                            byte_str, date, xtime, content_type, item_name)
                 total_bytes += item_bytes
 
         # report totals
@@ -688,7 +692,7 @@ st_upload_options = '''[--changed] [--skip-identical] [--segment-size <size>]
                     [--object-threads <thread>] [--segment-threads <threads>]
                     [--header <header>] [--use-slo] [--ignore-checksum]
                     [--object-name <object-name>]
-                    <container> <file_or_directory>
+                    <container> <file_or_directory> [<file_or_directory>] [...]
 '''
 
 st_upload_help = ''' Uploads specified files and directories to the given container.
@@ -1004,7 +1008,8 @@ def st_auth(parser, args, thread_manager):
         print('export OS_AUTH_TOKEN=%s' % sh_quote(token))
 
 
-st_tempurl_options = '<method> <seconds> <path> <key>'
+st_tempurl_options = '''[--absolute]
+                     <method> <seconds> <path> <key>'''
 
 
 st_tempurl_help = '''
@@ -1151,7 +1156,7 @@ def main(arguments=None):
     version = client_version
     parser = OptionParser(version='python-swiftclient %s' % version,
                           usage='''
-usage: %%prog [--version] [--help] [--os-help] [--snet] [--verbose]
+usage: %prog [--version] [--help] [--os-help] [--snet] [--verbose]
              [--debug] [--info] [--quiet] [--auth <auth_url>]
              [--auth-version <auth_version>] [--user <username>]
              [--key <api_key>] [--retries <num_retries>]
@@ -1191,29 +1196,29 @@ Positional arguments:
     auth                 Display auth related environment variables.
 
 Examples:
-  %%prog download --help
+  %prog download --help
 
-  %%prog -A https://auth.api.rackspacecloud.com/v1.0 -U user -K api_key stat -v
+  %prog -A https://auth.api.rackspacecloud.com/v1.0 -U user -K api_key stat -v
 
-  %%prog --os-auth-url https://api.example.com/v2.0 --os-tenant-name tenant \\
+  %prog --os-auth-url https://api.example.com/v2.0 --os-tenant-name tenant \\
       --os-username user --os-password password list
 
-  %%prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
+  %prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
       --os-project-name project1 --os-project-domain-name domain1 \\
       --os-username user --os-user-domain-name domain1 \\
       --os-password password list
 
-  %%prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
+  %prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
       --os-project-id 0123456789abcdef0123456789abcdef \\
       --os-user-id abcdef0123456789abcdef0123456789 \\
       --os-password password list
 
-  %%prog --os-auth-token 6ee5eb33efad4e45ab46806eac010566 \\
+  %prog --os-auth-token 6ee5eb33efad4e45ab46806eac010566 \\
       --os-storage-url https://10.1.5.2:8080/v1/AUTH_ced809b6a4baea7aeab61a \\
       list
 
-  %%prog list --lh
-'''.strip('\n') % globals())
+  %prog list --lh
+'''.strip('\n'))
     parser.add_option('--os-help', action='store_true', dest='os_help',
                       help='Show OpenStack authentication options.')
     parser.add_option('--os_help', action='store_true', help=SUPPRESS_HELP)
@@ -1414,6 +1419,7 @@ Examples:
         logging.getLogger("swiftclient")
         if options.debug:
             logging.basicConfig(level=logging.DEBUG)
+            logging.getLogger('iso8601').setLevel(logging.WARNING)
         elif options.info:
             logging.basicConfig(level=logging.INFO)
 

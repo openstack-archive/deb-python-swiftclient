@@ -14,18 +14,14 @@
 # limitations under the License.
 
 import logging
-
-try:
-    from unittest import mock
-except ImportError:
-    import mock
-
+import mock
 import six
 import socket
 import testtools
 import warnings
 import tempfile
 from hashlib import md5
+from six import binary_type
 from six.moves.urllib.parse import urlparse
 
 from .utils import (MockHttpTest, fake_get_auth_keystone, StubResponse,
@@ -44,7 +40,7 @@ class TestClientException(testtools.TestCase):
 
     def test_format(self):
         exc = c.ClientException('something failed')
-        self.assertTrue('something failed' in str(exc))
+        self.assertIn('something failed', str(exc))
         test_kwargs = (
             'scheme',
             'host',
@@ -60,7 +56,7 @@ class TestClientException(testtools.TestCase):
                 'http_%s' % value: value,
             }
             exc = c.ClientException('test', **kwargs)
-            self.assertTrue(value in str(exc))
+            self.assertIn(value, str(exc))
 
 
 class MockHttpResponse(object):
@@ -130,13 +126,38 @@ class TestHttpHelpers(MockHttpTest):
         value = u'unicode:\xe9\u20ac'
         self.assertEqual('unicode%3A%C3%A9%E2%82%AC', c.quote(value))
 
+    def test_parse_header_string(self):
+        value = b'bytes'
+        self.assertEqual(u'bytes', c.parse_header_string(value))
+        value = u'unicode:\xe9\u20ac'
+        self.assertEqual(u'unicode:\xe9\u20ac', c.parse_header_string(value))
+        value = 'native%20string'
+        self.assertEqual(u'native string', c.parse_header_string(value))
+
+        value = b'encoded%20bytes%E2%82%AC'
+        self.assertEqual(u'encoded bytes\u20ac', c.parse_header_string(value))
+        value = 'encoded%20unicode%E2%82%AC'
+        self.assertEqual(u'encoded unicode\u20ac',
+                         c.parse_header_string(value))
+
+        value = b'bad%20bytes%ff%E2%82%AC'
+        self.assertEqual(u'bad%20bytes%ff%E2%82%AC',
+                         c.parse_header_string(value))
+        value = u'bad%20unicode%ff\u20ac'
+        self.assertEqual(u'bad%20unicode%ff\u20ac',
+                         c.parse_header_string(value))
+
+        value = b'really%20bad\xffbytes'
+        self.assertEqual(u'really%2520bad%FFbytes',
+                         c.parse_header_string(value))
+
     def test_http_connection(self):
         url = 'http://www.test.com'
         _junk, conn = c.http_connection(url)
-        self.assertTrue(isinstance(conn, c.HTTPConnection))
+        self.assertIs(type(conn), c.HTTPConnection)
         url = 'https://www.test.com'
         _junk, conn = c.http_connection(url)
-        self.assertTrue(isinstance(conn, c.HTTPConnection))
+        self.assertIs(type(conn), c.HTTPConnection)
         url = 'ftp://www.test.com'
         self.assertRaises(c.ClientException, c.http_connection, url)
 
@@ -146,18 +167,16 @@ class TestHttpHelpers(MockHttpTest):
                    u'x-account-meta-\u0394': '123',
                    u'x-object-meta-\u0394': '123'}
 
-        encoded_str_type = type(''.encode())
         r = swiftclient.encode_meta_headers(headers)
 
         self.assertEqual(len(headers), len(r))
         # ensure non meta headers are not encoded
-        self.assertTrue('abc' in r)
-        self.assertTrue(isinstance(r['abc'], encoded_str_type))
+        self.assertIs(type(r.get('abc')), binary_type)
         del r['abc']
 
         for k, v in r.items():
-            self.assertTrue(isinstance(k, encoded_str_type))
-            self.assertTrue(isinstance(v, encoded_str_type))
+            self.assertIs(type(k), binary_type)
+            self.assertIs(type(v), binary_type)
 
     def test_set_user_agent_default(self):
         _junk, conn = c.http_connection('http://www.example.com')
@@ -499,32 +518,53 @@ class TestGetAccount(MockHttpTest):
 
     def test_no_content(self):
         c.http_connection = self.fake_http_connection(204)
-        value = c.get_account('http://www.test.com', 'asdf')[1]
+        value = c.get_account('http://www.test.com/v1/acct', 'asdf')[1]
         self.assertEqual(value, [])
+        self.assertRequests([
+            ('GET', '/v1/acct?format=json', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
     def test_param_marker(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&marker=marker")
-        c.get_account('http://www.test.com', 'asdf', marker='marker')
+        c.get_account('http://www.test.com/v1/acct', 'asdf', marker='marker')
+        self.assertRequests([
+            ('GET', '/v1/acct?format=json&marker=marker', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
     def test_param_limit(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&limit=10")
-        c.get_account('http://www.test.com', 'asdf', limit=10)
+        c.get_account('http://www.test.com/v1/acct', 'asdf', limit=10)
+        self.assertRequests([
+            ('GET', '/v1/acct?format=json&limit=10', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
     def test_param_prefix(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&prefix=asdf/")
-        c.get_account('http://www.test.com', 'asdf', prefix='asdf/')
+        c.get_account('http://www.test.com/v1/acct', 'asdf', prefix='asdf/')
+        self.assertRequests([
+            ('GET', '/v1/acct?format=json&prefix=asdf/', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
     def test_param_end_marker(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&end_marker=end_marker")
-        c.get_account('http://www.test.com', 'asdf', end_marker='end_marker')
+        c.get_account('http://www.test.com/v1/acct', 'asdf',
+                      end_marker='end_marker')
+        self.assertRequests([
+            ('GET', '/v1/acct?format=json&end_marker=end_marker', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
 
 class TestHeadAccount(MockHttpTest):
@@ -559,46 +599,93 @@ class TestGetContainer(MockHttpTest):
 
     def test_no_content(self):
         c.http_connection = self.fake_http_connection(204)
-        value = c.get_container('http://www.test.com', 'asdf', 'asdf')[1]
+        value = c.get_container('http://www.test.com/v1/acct', 'token',
+                                'container')[1]
         self.assertEqual(value, [])
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json', '', {
+                'x-auth-token': 'token'}),
+        ])
 
     def test_param_marker(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&marker=marker")
-        c.get_container('http://www.test.com', 'asdf', 'asdf', marker='marker')
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
+                        marker='marker')
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&marker=marker', '', {
+                'x-auth-token': 'token'}),
+        ])
 
     def test_param_limit(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&limit=10")
-        c.get_container('http://www.test.com', 'asdf', 'asdf', limit=10)
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
+                        limit=10)
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&limit=10', '', {
+                'x-auth-token': 'token'}),
+        ])
 
     def test_param_prefix(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&prefix=asdf/")
-        c.get_container('http://www.test.com', 'asdf', 'asdf', prefix='asdf/')
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
+                        prefix='asdf/')
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&prefix=asdf/', '', {
+                'x-auth-token': 'token'}),
+        ])
 
     def test_param_delimiter(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&delimiter=/")
-        c.get_container('http://www.test.com', 'asdf', 'asdf', delimiter='/')
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
+                        delimiter='/')
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&delimiter=/', '', {
+                'x-auth-token': 'token'}),
+        ])
 
     def test_param_end_marker(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&end_marker=end_marker")
-        c.get_container('http://www.test.com', 'asdf', 'asdf',
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
                         end_marker='end_marker')
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&end_marker=end_marker',
+             '', {'x-auth-token': 'token'}),
+        ])
 
     def test_param_path(self):
         c.http_connection = self.fake_http_connection(
             204,
             query_string="format=json&path=asdf")
-        c.get_container('http://www.test.com', 'asdf', 'asdf',
+        c.get_container('http://www.test.com/v1/acct', 'token', 'container',
                         path='asdf')
+        self.assertRequests([
+            ('GET', '/v1/acct/container?format=json&path=asdf', '', {
+                'x-auth-token': 'token'}),
+        ])
+
+    def test_request_headers(self):
+        c.http_connection = self.fake_http_connection(
+            204, query_string="format=json")
+        conn = c.http_connection('http://www.test.com')
+        headers = {'x-client-key': 'client key'}
+        c.get_container('url_is_irrelevant', 'TOKEN', 'container',
+                        http_conn=conn, headers=headers)
+        self.assertRequests([
+            ('GET', '/container?format=json', '', {
+                'x-auth-token': 'TOKEN',
+                'x-client-key': 'client key',
+            }),
+        ])
 
 
 class TestHeadContainer(MockHttpTest):
@@ -632,8 +719,13 @@ class TestPutContainer(MockHttpTest):
 
     def test_ok(self):
         c.http_connection = self.fake_http_connection(200)
-        value = c.put_container('http://www.test.com', 'asdf', 'asdf')
+        value = c.put_container('http://www.test.com', 'token', 'container')
         self.assertEqual(value, None)
+        self.assertRequests([
+            ('PUT', '/container', '', {
+                'x-auth-token': 'token',
+                'content-length': '0'}),
+        ])
 
     def test_server_error(self):
         body = 'c' * 60
@@ -642,7 +734,9 @@ class TestPutContainer(MockHttpTest):
                               'http://www.test.com', 'token', 'container')
         self.assertEqual(e.http_response_content, body)
         self.assertRequests([
-            ('PUT', '/container', '', {'x-auth-token': 'token'}),
+            ('PUT', '/container', '', {
+                'x-auth-token': 'token',
+                'content-length': '0'}),
         ])
 
 
@@ -650,8 +744,12 @@ class TestDeleteContainer(MockHttpTest):
 
     def test_ok(self):
         c.http_connection = self.fake_http_connection(200)
-        value = c.delete_container('http://www.test.com', 'asdf', 'asdf')
+        value = c.delete_container('http://www.test.com', 'token', 'container')
         self.assertEqual(value, None)
+        self.assertRequests([
+            ('DELETE', '/container', '', {
+                'x-auth-token': 'token'}),
+        ])
 
 
 class TestGetObject(MockHttpTest):
@@ -666,12 +764,10 @@ class TestGetObject(MockHttpTest):
                                                       query_string="hello=20")
         c.get_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
                      query_string="hello=20")
-        for req in self.iter_request_log():
-            self.assertEqual(req['method'], 'GET')
-            self.assertEqual(req['parsed_path'].path, '/asdf/asdf')
-            self.assertEqual(req['parsed_path'].query, 'hello=20')
-            self.assertEqual(req['body'], '')
-            self.assertEqual(req['headers']['x-auth-token'], 'asdf')
+        self.assertRequests([
+            ('GET', '/asdf/asdf?hello=20', '', {
+                'x-auth-token': 'asdf'}),
+        ])
 
     def test_request_headers(self):
         c.http_connection = self.fake_http_connection(200)
@@ -685,6 +781,18 @@ class TestGetObject(MockHttpTest):
                 'range': 'bytes=1-2',
             }),
         ])
+
+    def test_response_headers(self):
+        c.http_connection = self.fake_http_connection(
+            200, headers={'X-Utf-8-Header': b't%c3%a9st',
+                          'X-Non-Utf-8-Header': b'%ff',
+                          'X-Binary-Header': b'\xff'})
+        conn = c.http_connection('http://www.test.com')
+        headers, data = c.get_object('url_is_irrelevant', 'TOKEN',
+                                     'container', 'object', http_conn=conn)
+        self.assertEqual(u't\xe9st', headers.get('x-utf-8-header', ''))
+        self.assertEqual(u'%ff', headers.get('x-non-utf-8-header', ''))
+        self.assertEqual(u'%FF', headers.get('x-binary-header', ''))
 
     def test_chunk_size_read_method(self):
         conn = c.Connection('http://auth.url/', 'some_user', 'some_key')
@@ -729,14 +837,35 @@ class TestHeadObject(MockHttpTest):
         self.assertRaises(c.ClientException, c.head_object,
                           'http://www.test.com', 'asdf', 'asdf', 'asdf')
 
+    def test_request_headers(self):
+        c.http_connection = self.fake_http_connection(204)
+        conn = c.http_connection('http://www.test.com')
+        headers = {'x-client-key': 'client key'}
+        c.head_object('url_is_irrelevant', 'TOKEN', 'container',
+                      'asdf', http_conn=conn, headers=headers)
+        self.assertRequests([
+            ('HEAD', '/container/asdf', '', {
+                'x-auth-token': 'TOKEN',
+                'x-client-key': 'client key',
+            }),
+        ])
+
 
 class TestPutObject(MockHttpTest):
 
     def test_ok(self):
         c.http_connection = self.fake_http_connection(200)
-        args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', 'asdf')
+        args = ('http://www.test.com', 'TOKEN', 'container', 'obj', 'body', 4)
         value = c.put_object(*args)
-        self.assertTrue(isinstance(value, six.string_types))
+        self.assertIsInstance(value, six.string_types)
+        self.assertEqual(value, EMPTY_ETAG)
+        self.assertRequests([
+            ('PUT', '/container/obj', 'body', {
+                'x-auth-token': 'TOKEN',
+                'content-length': '4',
+                'content-type': ''
+            }),
+        ])
 
     def test_unicode_ok(self):
         conn = c.http_connection(u'http://www.test.com/')
@@ -754,7 +883,7 @@ class TestPutObject(MockHttpTest):
         conn[1].getresponse = resp.fake_response
         conn[1]._request = resp._fake_request
         value = c.put_object(*args, headers=headers, http_conn=conn)
-        self.assertTrue(isinstance(value, six.string_types))
+        self.assertIsInstance(value, six.string_types)
         # Test for RFC-2616 encoded symbols
         self.assertIn(("a-b", b".x:yz mn:fg:lp"),
                       resp.buffer)
@@ -789,7 +918,8 @@ class TestPutObject(MockHttpTest):
         self.assertEqual(e.http_response_content, body)
         self.assertEqual(e.http_status, 500)
         self.assertRequests([
-            ('PUT', '/asdf/asdf', 'asdf', {'x-auth-token': 'asdf'}),
+            ('PUT', '/asdf/asdf', 'asdf', {
+                'x-auth-token': 'asdf', 'content-type': ''}),
         ])
 
     def test_query_string(self):
@@ -822,8 +952,7 @@ class TestPutObject(MockHttpTest):
                              contents=mock_file, **kwarg)
 
                 req_data = resp.requests_params['data']
-                self.assertTrue(isinstance(req_data,
-                                           swiftclient.utils.LengthWrapper))
+                self.assertIs(type(req_data), swiftclient.utils.LengthWrapper)
                 self.assertEqual(raw_data_len, len(req_data.read()))
 
     def test_chunk_upload(self):
@@ -921,13 +1050,37 @@ class TestPutObject(MockHttpTest):
         request_header = resp.requests_params['headers']
         self.assertEqual(request_header['content-type'], b'')
 
+    def test_content_type_in_headers(self):
+        conn = c.http_connection(u'http://www.test.com/')
+        resp = MockHttpResponse(status=200)
+        conn[1].getresponse = resp.fake_response
+        conn[1]._request = resp._fake_request
+
+        # title-case header
+        hdrs = {'Content-Type': 'text/Plain'}
+        c.put_object(url='http://www.test.com', http_conn=conn, headers=hdrs)
+        request_header = resp.requests_params['headers']
+        self.assertEqual(request_header['content-type'], b'text/Plain')
+
+        # method param overrides headers
+        c.put_object(url='http://www.test.com', http_conn=conn, headers=hdrs,
+                     content_type='image/jpeg')
+        request_header = resp.requests_params['headers']
+        self.assertEqual(request_header['content-type'], b'image/jpeg')
+
 
 class TestPostObject(MockHttpTest):
 
     def test_ok(self):
         c.http_connection = self.fake_http_connection(200)
-        args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', {})
+        args = ('http://www.test.com', 'token', 'container', 'obj',
+                {'X-Object-Meta-Test': 'mymeta'})
         c.post_object(*args)
+        self.assertRequests([
+            ('POST', '/container/obj', '', {
+                'x-auth-token': 'token',
+                'X-Object-Meta-Test': 'mymeta'}),
+        ])
 
     def test_unicode_ok(self):
         conn = c.http_connection(u'http://www.test.com/')
@@ -974,7 +1127,12 @@ class TestDeleteObject(MockHttpTest):
 
     def test_ok(self):
         c.http_connection = self.fake_http_connection(200)
-        c.delete_object('http://www.test.com', 'asdf', 'asdf', 'asdf')
+        c.delete_object('http://www.test.com', 'token', 'container', 'obj')
+        self.assertRequests([
+            ('DELETE', 'http://www.test.com/container/obj', '', {
+                'x-auth-token': 'token',
+            }),
+        ])
 
     def test_server_error(self):
         c.http_connection = self.fake_http_connection(500)
@@ -984,8 +1142,13 @@ class TestDeleteObject(MockHttpTest):
     def test_query_string(self):
         c.http_connection = self.fake_http_connection(200,
                                                       query_string="hello=20")
-        c.delete_object('http://www.test.com', 'asdf', 'asdf', 'asdf',
+        c.delete_object('http://www.test.com', 'token', 'container', 'obj',
                         query_string="hello=20")
+        self.assertRequests([
+            ('DELETE', 'http://www.test.com/container/obj?hello=20', '', {
+                'x-auth-token': 'token',
+            }),
+        ])
 
 
 class TestGetCapabilities(MockHttpTest):
@@ -995,7 +1158,7 @@ class TestGetCapabilities(MockHttpTest):
         http_conn = conn('http://www.test.com/info')
         info = c.get_capabilities(http_conn)
         self.assertRequests([
-            ('GET', '/info'),
+            ('GET', '/info', '', {}),
         ])
         self.assertEqual(info, {})
         self.assertTrue(http_conn[1].resp.has_been_read)
@@ -1022,8 +1185,10 @@ class TestGetCapabilities(MockHttpTest):
             info = conn.get_capabilities()
         self.assertEqual(info, stub_info)
         self.assertRequests([
-            ('GET', '/auth/v1.0'),
-            ('GET', 'http://storage.example.com/info'),
+            ('GET', '/auth/v1.0', '', {
+                'x-auth-user': 'user',
+                'x-auth-key': 'key'}),
+            ('GET', 'http://storage.example.com/info', '', {}),
         ])
 
     def test_conn_get_capabilities_with_os_auth(self):
@@ -1574,7 +1739,6 @@ class TestConnection(MockHttpTest):
 
         # check timeout is passed to keystone client
         self.assertEqual(1, len(fake_ks.calls))
-        self.assertTrue('timeout' in fake_ks.calls[0])
         self.assertEqual(33.0, fake_ks.calls[0].get('timeout'))
         # check timeout passed to HEAD for account
         self.assertEqual(timeouts, [33.0])
@@ -1644,9 +1808,7 @@ class TestConnection(MockHttpTest):
             parsed = urlparse(url)
             return parsed, LocalConnection()
 
-        orig_conn = c.http_connection
-        try:
-            c.http_connection = local_http_connection
+        with mock.patch.object(c, 'http_connection', local_http_connection):
             conn = c.Connection('http://www.example.com', 'asdf', 'asdf',
                                 retries=1, starting_backoff=.0001)
 
@@ -1678,8 +1840,59 @@ class TestConnection(MockHttpTest):
             self.assertEqual(contents.seeks, [])
             self.assertEqual(str(exc), "put_object('c', 'o', ...) failure "
                              "and no ability to reset contents for reupload.")
-        finally:
-            c.http_connection = orig_conn
+
+    def test_get_container(self):
+        headers = {'X-Favourite-Pet': 'Aardvark'}
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200, body=b'{}')):
+            with mock.patch('swiftclient.client.get_auth',
+                            lambda *a, **k: ('http://url:8080/v1/a', 'token')):
+                conn = c.Connection()
+                conn.get_container('c1', prefix='p', limit=5,
+                                   headers=headers)
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        self.assertRequests([
+            ('GET', '/v1/a/c1?format=json&limit=5&prefix=p', '', {
+                'x-auth-token': 'token',
+                'X-Favourite-Pet': 'Aardvark',
+            }),
+        ])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_head_container(self):
+        headers = {'X-Favourite-Pet': 'Aardvark'}
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200, body=b'{}')):
+            with mock.patch('swiftclient.client.get_auth',
+                            lambda *a, **k: ('http://url:8080/v1/a', 'token')):
+                conn = c.Connection()
+                conn.head_container('c1', headers=headers)
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        self.assertRequests([
+            ('HEAD', '/v1/a/c1', '', {
+                'x-auth-token': 'token',
+                'X-Favourite-Pet': 'Aardvark',
+            }),
+        ])
+        self.assertEqual(conn.attempts, 1)
+
+    def test_head_object(self):
+        headers = {'X-Favourite-Pet': 'Aardvark'}
+        with mock.patch('swiftclient.client.http_connection',
+                        self.fake_http_connection(200)):
+            with mock.patch('swiftclient.client.get_auth',
+                            lambda *a, **k: ('http://url:8080/v1/a', 'token')):
+                conn = c.Connection()
+                conn.head_object('c1', 'o1',
+                                 headers=headers)
+        self.assertEqual(1, len(self.request_log), self.request_log)
+        self.assertRequests([
+            ('HEAD', '/v1/a/c1/o1', '', {
+                'x-auth-token': 'token',
+                'X-Favourite-Pet': 'Aardvark',
+            }),
+        ])
+        self.assertEqual(conn.attempts, 1)
 
 
 class TestResponseDict(MockHttpTest):
@@ -1724,10 +1937,8 @@ class TestResponseDict(MockHttpTest):
                                       *call[1:],
                                       response_dict=resp_dict)
 
-            self.assertTrue('test' in resp_dict)
-            self.assertEqual('should be untouched', resp_dict['test'])
-            self.assertTrue('response_dicts' in resp_dict)
-            self.assertEqual([{}], resp_dict['response_dicts'])
+            self.assertEqual('should be untouched', resp_dict.get('test'))
+            self.assertEqual([{}], resp_dict.get('response_dicts'))
 
     def test_response_dict(self):
         # test response_dict is populated and
@@ -1741,15 +1952,13 @@ class TestResponseDict(MockHttpTest):
                     conn = c.Connection('http://127.0.0.1:8080', 'user', 'key')
                     getattr(conn, call[0])(*call[1:], response_dict=resp_dict)
 
-            for key in ('test', 'status', 'headers', 'reason',
-                        'response_dicts'):
-                self.assertTrue(key in resp_dict)
-            self.assertEqual('should be untouched', resp_dict.pop('test'))
-            self.assertEqual('Fake', resp_dict['reason'])
-            self.assertEqual(200, resp_dict['status'])
-            self.assertTrue('x-works' in resp_dict['headers'])
-            self.assertEqual('yes', resp_dict['headers']['x-works'])
-            children = resp_dict.pop('response_dicts')
+            self.assertEqual('should be untouched',
+                             resp_dict.pop('test', None))
+            self.assertEqual('Fake', resp_dict.get('reason'))
+            self.assertEqual(200, resp_dict.get('status'))
+            self.assertIn('headers', resp_dict)
+            self.assertEqual('yes', resp_dict['headers'].get('x-works'))
+            children = resp_dict.pop('response_dicts', [])
             self.assertEqual(1, len(children))
             self.assertEqual(resp_dict, children[0])
 
@@ -1766,15 +1975,13 @@ class TestResponseDict(MockHttpTest):
                     conn = c.Connection('http://127.0.0.1:8080', 'user', 'key')
                     getattr(conn, call[0])(*call[1:], response_dict=resp_dict)
 
-            for key in ('test', 'status', 'headers', 'reason',
-                        'response_dicts'):
-                self.assertTrue(key in resp_dict)
-            self.assertEqual('should be untouched', resp_dict.pop('test'))
-            self.assertEqual('Fake', resp_dict['reason'])
-            self.assertEqual(200, resp_dict['status'])
-            self.assertTrue('x-works' in resp_dict['headers'])
-            self.assertEqual('yes', resp_dict['headers']['x-works'])
-            children = resp_dict.pop('response_dicts')
+            self.assertEqual('should be untouched',
+                             resp_dict.pop('test', None))
+            self.assertEqual('Fake', resp_dict.get('reason'))
+            self.assertEqual(200, resp_dict.get('status'))
+            self.assertIn('headers', resp_dict)
+            self.assertEqual('yes', resp_dict['headers'].get('x-works'))
+            children = resp_dict.pop('response_dicts', [])
             self.assertEqual(2, len(children))
             self.assertEqual({'existing': 'response dict'}, children[0])
             self.assertEqual(resp_dict, children[1])
@@ -1799,7 +2006,7 @@ class TestLogging(MockHttpTest):
         c.http_connection = self.fake_http_connection(200)
         args = ('http://www.test.com', 'asdf', 'asdf', 'asdf', 'asdf')
         value = c.put_object(*args)
-        self.assertTrue(isinstance(value, six.string_types))
+        self.assertIsInstance(value, six.string_types)
 
     def test_head_error(self):
         c.http_connection = self.fake_http_connection(500)
@@ -1849,14 +2056,14 @@ class TestServiceToken(MockHttpTest):
         conn = c.Connection('http://www.test.com', 'asdf', 'asdf',
                             os_options=self.os_options)
 
-        self.assertTrue(isinstance(conn, c.Connection))
+        self.assertIs(type(conn), c.Connection)
         conn.get_auth = self.get_auth
         conn.get_service_auth = self.get_service_auth
 
         self.assertEqual(conn.attempts, 0)
         self.assertEqual(conn.service_token, None)
 
-        self.assertTrue(isinstance(conn, c.Connection))
+        self.assertIs(type(conn), c.Connection)
         return conn
 
     def get_auth(self):
@@ -1940,8 +2147,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('GET', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/?format=json',
                              actual['full_path'])
@@ -1956,8 +2162,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('HEAD', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com', actual['full_path'])
 
@@ -1972,8 +2177,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('POST', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com', actual['full_path'])
         self.assertEqual(conn.attempts, 1)
@@ -1987,8 +2191,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('DELETE', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1',
                              actual['full_path'])
@@ -2004,8 +2207,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('GET', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1?format=json',
                              actual['full_path'])
@@ -2020,8 +2222,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('HEAD', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1',
                              actual['full_path'])
@@ -2036,8 +2237,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('POST', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1',
                              actual['full_path'])
@@ -2052,8 +2252,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('PUT', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1',
                              actual['full_path'])
@@ -2068,8 +2267,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('GET', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1/obj1',
                              actual['full_path'])
@@ -2084,8 +2282,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('HEAD', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1/obj1',
                              actual['full_path'])
@@ -2100,8 +2297,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('PUT', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1/obj1',
                              actual['full_path'])
@@ -2116,8 +2312,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('POST', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1/obj1',
                              actual['full_path'])
@@ -2132,8 +2327,7 @@ class TestServiceToken(MockHttpTest):
         for actual in self.iter_request_log():
             self.assertEqual('DELETE', actual['method'])
             actual_hdrs = actual['headers']
-            self.assertTrue('X-Service-Token' in actual_hdrs)
-            self.assertEqual('stoken', actual_hdrs['X-Service-Token'])
+            self.assertEqual('stoken', actual_hdrs.get('X-Service-Token'))
             self.assertEqual('token', actual_hdrs['X-Auth-Token'])
             self.assertEqual('http://storage_url.com/container1/obj1?a_string',
                              actual['full_path'])

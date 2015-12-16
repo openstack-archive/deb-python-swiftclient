@@ -29,7 +29,7 @@ from threading import Thread
 from six import StringIO, text_type
 from six.moves.queue import Queue
 from six.moves.queue import Empty as QueueEmpty
-from six.moves.urllib.parse import quote, unquote
+from six.moves.urllib.parse import quote
 from six import Iterator, string_types
 
 import json
@@ -1298,10 +1298,10 @@ class SwiftService(object):
 
                         The SwiftUploadObject source may be one of:
 
-                            file - A file like object (with a read method)
-                            path - A string containing the path to a local file
-                                   or directory
-                            None - Indicates that we want an empty object
+                            * A file-like object (with a read method)
+                            * A string containing the path to a local
+                              file or directory
+                            * None, to indicate that we want an empty object
 
         :param options: A dictionary containing options to override the global
                         options specified during the service object creation.
@@ -1954,8 +1954,7 @@ class SwiftService(object):
                 delobjsmap = {}
                 if old_manifest:
                     scontainer, sprefix = old_manifest.split('/', 1)
-                    scontainer = unquote(scontainer)
-                    sprefix = unquote(sprefix).rstrip('/') + '/'
+                    sprefix = sprefix.rstrip('/') + '/'
                     delobjsmap[scontainer] = []
                     for part in self.list(scontainer, {'prefix': sprefix}):
                         if not part["success"]:
@@ -2164,8 +2163,7 @@ class SwiftService(object):
                 dlo_segments_deleted = True
                 segment_pool = self.thread_manager.segment_pool
                 s_container, s_prefix = old_manifest.split('/', 1)
-                s_container = unquote(s_container)
-                s_prefix = unquote(s_prefix).rstrip('/') + '/'
+                s_prefix = s_prefix.rstrip('/') + '/'
 
                 del_segs = []
                 for part in self.list(
