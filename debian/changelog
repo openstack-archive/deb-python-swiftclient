@@ -1,6 +1,7 @@
 python-swiftclient (1:2.7.0-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * Added myself as uploader.
 
  -- Ondřej Nový <novy@ondrej.org>  Fri, 11 Dec 2015 17:12:55 +0100
 
