@@ -2,8 +2,8 @@
 
 set -e
 
-if [ "$1" = "remove" ] ; then
-	update-alternatives --remove swift /usr/bin/python3-swift
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ] ; then
+    update-alternatives --remove swift /usr/bin/python3-swift
 fi
 
 #DEBHELPER#
