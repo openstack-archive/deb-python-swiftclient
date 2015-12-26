@@ -27,7 +27,7 @@ override_dh_python3:
 
 override_dh_auto_clean:
 	dh_auto_clean
-	rm -rf build .testrepository
+	rm -rf build .testrepository python_swiftclient.egg-info
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
