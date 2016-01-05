@@ -3,7 +3,8 @@
 set -e
 
 if [ "$1" = "configure" ] ; then
-	update-alternatives --install /usr/bin/swift swift /usr/bin/python2-swift 300
+	update-alternatives --install /usr/bin/swift swift /usr/bin/python2-swift 300 \
+		--slave /usr/share/man/man1/swift.1.gz swift.1.gz /usr/share/man/man1/python2-swift.1.gz
 fi
 
 #DEBHELPER#

@@ -20,7 +20,10 @@ override_dh_install:
 	done
 	mv $(CURDIR)/debian/python-swiftclient/usr/bin/swift $(CURDIR)/debian/python-swiftclient/usr/bin/python2-swift
 	mv $(CURDIR)/debian/python3-swiftclient/usr/bin/swift $(CURDIR)/debian/python3-swiftclient/usr/bin/python3-swift
-	rm -rf $(CURDIR)/debian/python*-swiftclient/usr/share/man
+	mv $(CURDIR)/debian/python-swiftclient/usr/share/man/man1/swift.1 \
+		$(CURDIR)/debian/python-swiftclient/usr/share/man/man1/python2-swift.1
+	mv $(CURDIR)/debian/python3-swiftclient/usr/share/man/man1/swift.1 \
+		$(CURDIR)/debian/python3-swiftclient/usr/share/man/man1/python3-swift.1
 
 override_dh_python3:
 	dh_python3 --shebang=/usr/bin/python3
