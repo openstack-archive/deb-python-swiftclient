@@ -4,6 +4,7 @@ python-swiftclient (1:2.7.0-1) UNRELEASED; urgency=medium
   * Added myself as uploader.
   * Removed update-alternatives from postrm and fixed in prerm.
   * Moved man page from python-swiftclient-doc package to base packages.
+  * Removed python-pbr dependency.
 
  -- Ondřej Nový <novy@ondrej.org>  Fri, 11 Dec 2015 17:12:55 +0100
 
