@@ -2,7 +2,7 @@
 
 set -e
 
-if [ "$1" = "remove" ] ; then
+if [ "$1" = "remove" ] || [ "$1" = "disappear" ] ; then
 	update-alternatives --remove swift /usr/bin/python2-swift
 fi
 
