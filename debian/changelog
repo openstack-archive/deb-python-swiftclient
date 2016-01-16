@@ -1,11 +1,15 @@
 python-swiftclient (1:2.7.0-1) experimental; urgency=medium
 
+  [ Ondřej Nový ]
   * New upstream release.
   * Added myself as uploader.
   * Moved man page from python-swiftclient-doc package to base packages.
   * Removed python-pbr dependency.
 
- -- Ondřej Nový <novy@ondrej.org>  Fri, 11 Dec 2015 17:12:55 +0100
+  [ Thomas Goirand ]
+  * Fixed debian/copyright.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 16 Jan 2016 03:00:26 +0000
 
 python-swiftclient (1:2.6.0-3) unstable; urgency=medium
 

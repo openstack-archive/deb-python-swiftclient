@@ -2,8 +2,12 @@ Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: python-swiftclient
 Source: http://github.com/openstack/python-swiftclient.git
 
+Files: *
+Copyright: (c) 2010-2016, See AUTHORS file
+License: Apache-2
+
 Files: debian/*
-Copyright: (c) 2010-2013, Thomas Goirand <zigo@debian.org>
+Copyright: (c) 2010-2016, Thomas Goirand <zigo@debian.org>
            (c) 2012, Mehdi Abaakouk <sileht@sileht.net>
            (c) 2012, Roland Mas <lolando@debian.org>
            (c) 2014, Thomas Bechtold <toabctl@debian.org>
@@ -13,8 +17,6 @@ Copyright: (c) 2010-2013, Thomas Goirand <zigo@debian.org>
            (c) 2015-2016, Ondřej Nový <novy@ondrej.org>
 License: Apache-2
 
-Files: *
-Copyright: (c) 2010-2016, See AUTHORS file
 License: Apache-2
  This package is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
