@@ -1,4 +1,4 @@
-python-swiftclient (1:2.7.0-1) UNRELEASED; urgency=medium
+python-swiftclient (1:2.7.0-1) experimental; urgency=medium
 
   * New upstream release.
   * Added myself as uploader.
