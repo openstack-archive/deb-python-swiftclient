@@ -1,2 +1,2 @@
 Tests: client
-Depends: python-swiftclient
+Depends: python-swiftclient, python3-swiftclient
