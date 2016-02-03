@@ -1,9 +1,14 @@
-python-swiftclient (1:2.7.0-2) UNRELEASED; urgency=medium
+python-swiftclient (1:2.7.0-2) experimental; urgency=medium
 
+  [ Ondřej Nový ]
   * Watch file fixed
   * Debian tests: Test Python3 version of swift CLI
 
- -- Ondřej Nový <novy@ondrej.org>  Fri, 22 Jan 2016 11:57:55 -0500
+  [ Thomas Goirand ]
+  * Added patch:
+    Stop-passing-attr-to-keystoneclient-when-there-s-no-filter_value.patch
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 03 Feb 2016 17:21:54 +0800
 
 python-swiftclient (1:2.7.0-1) experimental; urgency=medium
 
