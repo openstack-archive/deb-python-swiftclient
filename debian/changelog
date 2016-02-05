@@ -1,8 +1,10 @@
 python-swiftclient (1:2.7.0-2) experimental; urgency=medium
 
   [ Ondřej Nový ]
-  * Watch file fixed
-  * Debian tests: Test Python3 version of swift CLI
+  * Watch file fixed.
+  * Debian tests: Test Python3 version of swift CLI.
+  * Standards-Version is 3.9.7 now (no change).
+  * Fixed Vcs URLs.
 
   [ Thomas Goirand ]
   * Added patch:

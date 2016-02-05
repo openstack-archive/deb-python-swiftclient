@@ -33,9 +33,9 @@ Build-Depends-Indep: python-concurrent.futures,
                      python3-testtools,
                      subunit,
                      testrepository,
-Standards-Version: 3.9.6
-Vcs-Git: git://anonscm.debian.org/openstack/python-swiftclient.git
-Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-swiftclient.git
+Standards-Version: 3.9.7
+Vcs-Git: https://anonscm.debian.org/git/openstack/python-swiftclient.git
+Vcs-Browser: https://anonscm.debian.org/cgit/openstack/python-swiftclient.git
 Homepage: https://github.com/openstack/python-swiftclient
 XS-Testsuite: autopkgtest
 
