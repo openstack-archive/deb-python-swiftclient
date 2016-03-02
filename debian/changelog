@@ -10,7 +10,7 @@ python-swiftclient (1:2.7.0-2) experimental; urgency=medium
   * Added patch:
     Stop-passing-attr-to-keystoneclient-when-there-s-no-filter_value.patch
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 03 Feb 2016 17:21:54 +0800
+ -- Ondřej Nový <novy@ondrej.org>  Wed, 02 Mar 2016 16:16:18 +0100
 
 python-swiftclient (1:2.7.0-1) experimental; urgency=medium
 
