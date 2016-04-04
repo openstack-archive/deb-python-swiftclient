@@ -1,7 +1,6 @@
 python-swiftclient (1:2.7.0-3) UNRELEASED; urgency=medium
 
   * Fixed hardcoded Python 2.7 version when running unit tests
-  * d/control: Added supported X-Python(3)-Version
 
  -- Ondřej Nový <novy@ondrej.org>  Wed, 23 Mar 2016 06:19:13 +0100
 
