@@ -32,9 +32,9 @@ import six
 from swiftclient import version as swiftclient_version
 from swiftclient.exceptions import ClientException
 from swiftclient.utils import (
-    LengthWrapper, ReadableToIterable, parse_api_response)
+    iter_wrapper, LengthWrapper, ReadableToIterable, parse_api_response)
 
-# Defautl is 100, increase to 256
+# Default is 100, increase to 256
 http_client._MAXHEADERS = 256
 
 AUTH_VERSIONS_V1 = ('1.0', '1', 1)
@@ -72,6 +72,69 @@ if StrictVersion(requests.__version__) < StrictVersion('2.0.0'):
 logger = logging.getLogger("swiftclient")
 logger.addHandler(NullHandler())
 
+#: Default behaviour is to redact header values known to contain secrets,
+#: such as ``X-Auth-Key`` and ``X-Auth-Token``. Up to the first 16 chars
+#: may be revealed.
+#:
+#: To disable, set the value of ``redact_sensitive_headers`` to ``False``.
+#:
+#: When header redaction is enabled, ``reveal_sensitive_prefix`` configures the
+#: maximum length of any sensitive header data sent to the logs. If the header
+#: is less than twice this length, only ``int(len(value)/2)`` chars will be
+#: logged; if it is less than 15 chars long, even less will be logged.
+logger_settings = {
+    'redact_sensitive_headers': True,
+    'reveal_sensitive_prefix': 16
+}
+#: A list of sensitive headers to redact in logs. Note that when extending this
+#: list, the header names must be added in all lower case.
+LOGGER_SENSITIVE_HEADERS = [
+    'x-auth-token', 'x-auth-key', 'x-service-token', 'x-storage-token',
+    'x-account-meta-temp-url-key', 'x-account-meta-temp-url-key-2',
+    'x-container-meta-temp-url-key', 'x-container-meta-temp-url-key-2',
+    'set-cookie'
+]
+
+
+def safe_value(name, value):
+    """
+    Only show up to logger_settings['reveal_sensitive_prefix'] characters
+    from a sensitive header.
+
+    :param name: Header name
+    :param value: Header value
+    :return: Safe header value
+    """
+    if name.lower() in LOGGER_SENSITIVE_HEADERS:
+        prefix_length = logger_settings.get('reveal_sensitive_prefix', 16)
+        prefix_length = int(
+            min(prefix_length, (len(value) ** 2) / 32, len(value) / 2)
+        )
+        redacted_value = value[0:prefix_length]
+        return redacted_value + '...'
+    return value
+
+
+def scrub_headers(headers):
+    """
+    Redact header values that can contain sensitive information that
+    should not be logged.
+
+    :param headers: Either a dict or an iterable of two-element tuples
+    :return: Safe dictionary of headers with sensitive information removed
+    """
+    if isinstance(headers, dict):
+        headers = headers.items()
+    headers = [
+        (parse_header_string(key), parse_header_string(val))
+        for (key, val) in headers
+    ]
+    if not logger_settings.get('redact_sensitive_headers', True):
+        return dict(headers)
+    if logger_settings.get('reveal_sensitive_prefix', 16) < 0:
+        logger_settings['reveal_sensitive_prefix'] = 16
+    return {key: safe_value(key, val) for (key, val) in headers}
+
 
 def http_log(args, kwargs, resp, body):
     if not logger.isEnabledFor(logging.INFO):
@@ -87,8 +150,9 @@ def http_log(args, kwargs, resp, body):
         else:
             string_parts.append(' %s' % element)
     if 'headers' in kwargs:
-        for element in kwargs['headers']:
-            header = ' -H "%s: %s"' % (element, kwargs['headers'][element])
+        headers = scrub_headers(kwargs['headers'])
+        for element in headers:
+            header = ' -H "%s: %s"' % (element, headers[element])
             string_parts.append(header)
 
     # log response as debug if good, or info if error
@@ -99,17 +163,19 @@ def http_log(args, kwargs, resp, body):
 
     log_method("REQ: %s", "".join(string_parts))
     log_method("RESP STATUS: %s %s", resp.status, resp.reason)
-    log_method("RESP HEADERS: %s", resp.getheaders())
+    log_method("RESP HEADERS: %s", scrub_headers(resp.getheaders()))
     if body:
         log_method("RESP BODY: %s", body)
 
 
 def parse_header_string(data):
+    if not isinstance(data, (six.text_type, six.binary_type)):
+        data = str(data)
     if six.PY2:
         if isinstance(data, six.text_type):
             # Under Python2 requests only returns binary_type, but if we get
             # some stray text_type input, this should prevent unquote from
-            # interpretting %-encoded data as raw code-points.
+            # interpreting %-encoded data as raw code-points.
             data = data.encode('utf8')
         try:
             unquoted = unquote(data).decode('utf8')
@@ -187,13 +253,71 @@ class _ObjectBody(object):
         return self
 
     def next(self):
-        buf = self.resp.read(self.chunk_size)
+        buf = self.read(self.chunk_size)
         if not buf:
             raise StopIteration()
         return buf
 
     def __next__(self):
         return self.next()
+
+
+class _RetryBody(_ObjectBody):
+    """
+    Wrapper for object body response which triggers a retry
+    (from offset) if the connection is dropped after partially
+    downloading the object.
+    """
+    def __init__(self, resp, connection, container, obj,
+                 resp_chunk_size=None, query_string=None, response_dict=None,
+                 headers=None):
+        """
+        Wrap the underlying response
+
+        :param resp: the response to wrap
+        :param connection: Connection class instance
+        :param container: the name of the container the object is in
+        :param obj: the name of object we are downloading
+        :param resp_chunk_size: if defined, chunk size of data to read
+        :param query_string: if set will be appended with '?' to generated path
+        :param response_dict: an optional dictionary into which to place
+                         the response - status, reason and headers
+        :param headers: an optional dictionary with additional headers to
+                         include in the request
+        """
+        super(_RetryBody, self).__init__(resp, resp_chunk_size)
+        self.expected_length = int(self.resp.getheader('Content-Length'))
+        self.conn = connection
+        self.container = container
+        self.obj = obj
+        self.query_string = query_string
+        self.response_dict = response_dict
+        self.headers = headers if headers is not None else {}
+        self.bytes_read = 0
+
+    def read(self, length=None):
+        buf = None
+        try:
+            buf = self.resp.read(length)
+            self.bytes_read += len(buf)
+        except (socket.error, RequestException) as e:
+            if self.conn.attempts > self.conn.retries:
+                logger.exception(e)
+                raise
+        if (not buf and self.bytes_read < self.expected_length and
+                self.conn.attempts <= self.conn.retries):
+            self.headers['Range'] = 'bytes=%d-' % self.bytes_read
+            self.headers['If-Match'] = self.resp.getheader('ETag')
+            hdrs, body = self.conn._retry(None, get_object,
+                                          self.container, self.obj,
+                                          resp_chunk_size=self.chunk_size,
+                                          query_string=self.query_string,
+                                          response_dict=self.response_dict,
+                                          headers=self.headers,
+                                          attempts=self.conn.attempts)
+            self.resp = body.resp
+            buf = self.read(length)
+        return buf
 
 
 class HTTPConnection(object):
@@ -328,11 +452,11 @@ def get_auth_1_0(url, user, key, snet, **kwargs):
     parsed, conn = http_connection(url, cacert=cacert, insecure=insecure,
                                    timeout=timeout)
     method = 'GET'
-    conn.request(method, parsed.path, '',
-                 {'X-Auth-User': user, 'X-Auth-Key': key})
+    headers = {'X-Auth-User': user, 'X-Auth-Key': key}
+    conn.request(method, parsed.path, '', headers)
     resp = conn.getresponse()
     body = resp.read()
-    http_log((url, method,), {}, resp, body)
+    http_log((url, method,), headers, resp, body)
     url = resp.getheader('x-storage-url')
 
     # There is a side-effect on current Rackspace 1.0 server where a
@@ -388,7 +512,7 @@ def get_auth_keystone(auth_url, user, key, os_options, **kwargs):
     insecure = kwargs.get('insecure', False)
     timeout = kwargs.get('timeout', None)
     auth_version = kwargs.get('auth_version', '2.0')
-    debug = logger.isEnabledFor(logging.DEBUG) and True or False
+    debug = logger.isEnabledFor(logging.DEBUG)
 
     ksclient, exceptions = _import_keystone_client(auth_version)
 
@@ -396,6 +520,7 @@ def get_auth_keystone(auth_url, user, key, os_options, **kwargs):
         _ksclient = ksclient.Client(
             username=user,
             password=key,
+            token=os_options.get('auth_token'),
             tenant_name=os_options.get('tenant_name'),
             tenant_id=os_options.get('tenant_id'),
             user_id=os_options.get('user_id'),
@@ -419,11 +544,14 @@ def get_auth_keystone(auth_url, user, key, os_options, **kwargs):
     service_type = os_options.get('service_type') or 'object-store'
     endpoint_type = os_options.get('endpoint_type') or 'publicURL'
     try:
+        filter_kwargs = {}
+        if os_options.get('region_name'):
+            filter_kwargs['attr'] = 'region'
+            filter_kwargs['filter_value'] = os_options['region_name']
         endpoint = _ksclient.service_catalog.url_for(
-            attr='region',
-            filter_value=os_options.get('region_name'),
             service_type=service_type,
-            endpoint_type=endpoint_type)
+            endpoint_type=endpoint_type,
+            **filter_kwargs)
     except exceptions.EndpointNotFound:
         raise ClientException('Endpoint for %s not found - '
                               'have you specified a region?' % service_type)
@@ -435,11 +563,11 @@ def get_auth(auth_url, user, key, **kwargs):
     Get authentication/authorization credentials.
 
     :kwarg auth_version: the api version of the supplied auth params
-    :kwarg os_options: a dict, the openstack idenity service options
+    :kwarg os_options: a dict, the openstack identity service options
 
     :returns: a tuple, (storage_url, token)
 
-    N.B. if the optional os_options paramater includes an non-empty
+    N.B. if the optional os_options parameter includes a non-empty
     'object_storage_url' key it will override the the default storage url
     returned by the auth service.
 
@@ -452,7 +580,6 @@ def get_auth(auth_url, user, key, **kwargs):
     auth_version = kwargs.get('auth_version', '1')
     os_options = kwargs.get('os_options', {})
 
-    storage_url, token = None, None
     cacert = kwargs.get('cacert', None)
     insecure = kwargs.get('insecure', False)
     timeout = kwargs.get('timeout', None)
@@ -470,7 +597,7 @@ def get_auth(auth_url, user, key, **kwargs):
         if user and not kwargs.get('tenant_name') and ':' in user:
             os_options['tenant_name'], user = user.split(':')
 
-        # We are allowing to have an tenant_name argument in get_auth
+        # We are allowing to have a tenant_name argument in get_auth
         # directly without having os_options
         if kwargs.get('tenant_name'):
             os_options['tenant_name'] = kwargs['tenant_name']
@@ -623,7 +750,7 @@ def head_account(url, token, http_conn=None, service_token=None):
 
 
 def post_account(url, token, headers, http_conn=None, response_dict=None,
-                 service_token=None):
+                 service_token=None, query_string=None, data=None):
     """
     Update an account's metadata.
 
@@ -635,17 +762,23 @@ def post_account(url, token, headers, http_conn=None, response_dict=None,
     :param response_dict: an optional dictionary into which to place
                      the response - status, reason and headers
     :param service_token: service auth token
+    :param query_string: if set will be appended with '?' to generated path
+    :param data: an optional message body for the request
     :raises ClientException: HTTP POST request failed
+    :returns: resp_headers, body
     """
     if http_conn:
         parsed, conn = http_conn
     else:
         parsed, conn = http_connection(url)
     method = 'POST'
+    path = parsed.path
+    if query_string:
+        path += '?' + query_string
     headers['X-Auth-Token'] = token
     if service_token:
         headers['X-Service-Token'] = service_token
-    conn.request(method, parsed.path, '', headers)
+    conn.request(method, path, data, headers)
     resp = conn.getresponse()
     body = resp.read()
     http_log((url, method,), {'headers': headers}, resp, body)
@@ -660,6 +793,10 @@ def post_account(url, token, headers, http_conn=None, response_dict=None,
                               http_status=resp.status,
                               http_reason=resp.reason,
                               http_response_content=body)
+    resp_headers = {}
+    for header, value in resp.getheaders():
+        resp_headers[header.lower()] = value
+    return resp_headers, body
 
 
 def get_container(url, token, container, marker=None, limit=None,
@@ -698,7 +835,7 @@ def get_container(url, token, container, marker=None, limit=None,
     if full_listing:
         rv = get_container(url, token, container, marker, limit, prefix,
                            delimiter, end_marker, path, http_conn,
-                           service_token, headers=headers)
+                           service_token=service_token, headers=headers)
         listing = rv[1]
         while listing:
             if not delimiter:
@@ -707,7 +844,7 @@ def get_container(url, token, container, marker=None, limit=None,
                 marker = listing[-1].get('name', listing[-1].get('subdir'))
             listing = get_container(url, token, container, marker, limit,
                                     prefix, delimiter, end_marker, path,
-                                    http_conn, service_token,
+                                    http_conn, service_token=service_token,
                                     headers=headers)[1]
             if listing:
                 rv[1].extend(listing)
@@ -1124,11 +1261,14 @@ def put_object(url, token=None, container=None, name=None, contents=None,
             warn_msg = ('%s object has no "read" method, ignoring chunk_size'
                         % type(contents).__name__)
             warnings.warn(warn_msg, stacklevel=2)
+        # Match requests's is_stream test
+        if hasattr(contents, '__iter__') and not isinstance(contents, (
+                six.text_type, six.binary_type, list, tuple, dict)):
+            contents = iter_wrapper(contents)
         conn.request('PUT', path, contents, headers)
 
     resp = conn.getresponse()
     body = resp.read()
-    headers = {'X-Auth-Token': token}
     http_log(('%s%s' % (url.replace(parsed.path, ''), path), 'PUT',),
              {'headers': headers}, resp, body)
 
@@ -1402,10 +1542,10 @@ class Connection(object):
             target_dict.update(response_dict)
 
     def _retry(self, reset_func, func, *args, **kwargs):
-        self.attempts = 0
         retried_auth = False
         backoff = self.starting_backoff
         caller_response_dict = kwargs.pop('response_dict', None)
+        self.attempts = kwargs.pop('attempts', 0)
         while self.attempts <= self.retries:
             self.attempts += 1
             try:
@@ -1474,9 +1614,11 @@ class Connection(object):
                            prefix=prefix, end_marker=end_marker,
                            full_listing=full_listing)
 
-    def post_account(self, headers, response_dict=None):
+    def post_account(self, headers, response_dict=None,
+                     query_string=None, data=None):
         """Wrapper for :func:`post_account`"""
         return self._retry(None, post_account, headers,
+                           query_string=query_string, data=data,
                            response_dict=response_dict)
 
     def head_container(self, container, headers=None):
@@ -1517,10 +1659,24 @@ class Connection(object):
     def get_object(self, container, obj, resp_chunk_size=None,
                    query_string=None, response_dict=None, headers=None):
         """Wrapper for :func:`get_object`"""
-        return self._retry(None, get_object, container, obj,
-                           resp_chunk_size=resp_chunk_size,
-                           query_string=query_string,
-                           response_dict=response_dict, headers=headers)
+        rheaders, body = self._retry(None, get_object, container, obj,
+                                     resp_chunk_size=resp_chunk_size,
+                                     query_string=query_string,
+                                     response_dict=response_dict,
+                                     headers=headers)
+        is_not_range_request = (
+            not headers or 'range' not in (k.lower() for k in headers))
+        retry_is_possible = (
+            is_not_range_request and resp_chunk_size and
+            self.attempts <= self.retries and
+            rheaders.get('transfer-encoding') is None)
+        if retry_is_possible:
+            body = _RetryBody(body.resp, self, container, obj,
+                              resp_chunk_size=resp_chunk_size,
+                              query_string=query_string,
+                              response_dict=response_dict,
+                              headers=headers)
+        return rheaders, body
 
     def put_object(self, container, obj, contents, content_length=None,
                    etag=None, chunk_size=None, content_type=None,
@@ -1540,10 +1696,12 @@ class Connection(object):
             if self.retries > 0:
                 tell = getattr(contents, 'tell', None)
                 seek = getattr(contents, 'seek', None)
+                reset = getattr(contents, 'reset', None)
                 if tell and seek:
                     orig_pos = tell()
                     reset_func = lambda *a, **k: seek(orig_pos)
-
+                elif reset:
+                    reset_func = reset
         return self._retry(reset_func, put_object, container, obj, contents,
                            content_length=content_length, etag=etag,
                            chunk_size=chunk_size, content_type=content_type,

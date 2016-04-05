@@ -23,7 +23,8 @@ import socket
 from optparse import OptionParser, OptionGroup, SUPPRESS_HELP
 from os import environ, walk, _exit as os_exit
 from os.path import isfile, isdir, join
-from six import text_type
+from six import text_type, PY2
+from six.moves.urllib.parse import unquote
 from sys import argv as sys_argv, exit, stderr
 from time import gmtime, strftime
 
@@ -32,6 +33,7 @@ from swiftclient.utils import config_true_value, generate_temp_url, prt_bytes
 from swiftclient.multithreading import OutputManager
 from swiftclient.exceptions import ClientException
 from swiftclient import __version__ as client_version
+from swiftclient.client import logger_settings as client_logger_settings
 from swiftclient.service import SwiftService, SwiftError, \
     SwiftUploadObject, get_conn
 from swiftclient.command_helpers import print_account_stats, \
@@ -82,6 +84,9 @@ def st_delete(parser, args, output_manager):
         '-a', '--all', action='store_true', dest='yes_all',
         default=False, help='Delete all containers and objects.')
     parser.add_option(
+        '-p', '--prefix', dest='prefix',
+        help='Only delete items beginning with the <prefix>.')
+    parser.add_option(
         '', '--leave-segments', action='store_true',
         dest='leave_segments', default=False,
         help='Do not delete segments of manifest objects.')
@@ -128,25 +133,55 @@ def st_delete(parser, args, output_manager):
                 o = r.get('object', '')
                 a = r.get('attempts')
 
-                if r['success']:
-                    if options.verbose:
-                        a = ' [after {0} attempts]'.format(a) if a > 1 else ''
+                if r['action'] == 'bulk_delete':
+                    if r['success']:
+                        objs = r.get('objects', [])
+                        for o, err in r.get('result', {}).get('Errors', []):
+                            # o will be of the form quote("/<cont>/<obj>")
+                            o = unquote(o)
+                            if PY2:
+                                # In PY3, unquote(unicode) uses utf-8 like we
+                                # want, but PY2 uses latin-1
+                                o = o.encode('latin-1').decode('utf-8')
+                            output_manager.error('Error Deleting: {0}: {1}'
+                                                 .format(o[1:], err))
+                            try:
+                                objs.remove(o[len(c) + 2:])
+                            except ValueError:
+                                # shouldn't happen, but ignoring it won't hurt
+                                pass
 
-                        if r['action'] == 'delete_object':
+                        for o in objs:
                             if options.yes_all:
                                 p = '{0}/{1}'.format(c, o)
                             else:
                                 p = o
-                        elif r['action'] == 'delete_segment':
-                            p = '{0}/{1}'.format(c, o)
-                        elif r['action'] == 'delete_container':
-                            p = c
-
-                        output_manager.print_msg('{0}{1}'.format(p, a))
+                            output_manager.print_msg('{0}{1}'.format(p, a))
+                    else:
+                        for o in r.get('objects', []):
+                            output_manager.error('Error Deleting: {0}/{1}: {2}'
+                                                 .format(c, o, r['error']))
                 else:
-                    p = '{0}/{1}'.format(c, o) if o else c
-                    output_manager.error('Error Deleting: {0}: {1}'
-                                         .format(p, r['error']))
+                    if r['success']:
+                        if options.verbose:
+                            a = (' [after {0} attempts]'.format(a)
+                                 if a > 1 else '')
+
+                            if r['action'] == 'delete_object':
+                                if options.yes_all:
+                                    p = '{0}/{1}'.format(c, o)
+                                else:
+                                    p = o
+                            elif r['action'] == 'delete_segment':
+                                p = '{0}/{1}'.format(c, o)
+                            elif r['action'] == 'delete_container':
+                                p = c
+
+                            output_manager.print_msg('{0}{1}'.format(p, a))
+                    else:
+                        p = '{0}/{1}'.format(c, o) if o else c
+                        output_manager.error('Error Deleting: {0}: {1}'
+                                             .format(p, r['error']))
         except SwiftError as err:
             output_manager.error(err.value)
 
@@ -897,13 +932,14 @@ def st_upload(parser, args, output_manager):
                                 if error.http_response_content:
                                     if msg:
                                         msg += ': '
-                                    msg += error.http_response_content[:60]
+                                    msg += (error.http_response_content
+                                            .decode('utf8')[:60])
                                 msg = ': %s' % msg
                         else:
                             msg = ': %s' % error
                         output_manager.warning(
                             'Warning: failed to create container '
-                            "'%s'%s", container, msg
+                            "'%s'%s", r['container'], msg
                         )
                     else:
                         output_manager.error("%s" % error)
@@ -1028,7 +1064,7 @@ Positional arguments:
                         "Temp-URL-Key:b3968d0207b54ece87cccc06515a89d4"\'
 
 Optional arguments:
-  --absolute            Interpet the <seconds> positional argument as a Unix
+  --absolute            Interpret the <seconds> positional argument as a Unix
                         timestamp rather than a number of seconds in the
                         future.
 '''.strip('\n')
@@ -1067,6 +1103,14 @@ def parse_args(parser, args, enforce_requires=True):
     if not args:
         args = ['-h']
     (options, args) = parser.parse_args(args)
+    if enforce_requires and (options.debug or options.info):
+        logging.getLogger("swiftclient")
+        if options.debug:
+            logging.basicConfig(level=logging.DEBUG)
+            logging.getLogger('iso8601').setLevel(logging.WARNING)
+            client_logger_settings['redact_sensitive_headers'] = False
+        elif options.info:
+            logging.basicConfig(level=logging.INFO)
 
     if len(args) > 1 and args[1] == '--help':
         _help = globals().get('st_%s_help' % args[0],
@@ -1158,7 +1202,9 @@ def main(arguments=None):
                           usage='''
 usage: %prog [--version] [--help] [--os-help] [--snet] [--verbose]
              [--debug] [--info] [--quiet] [--auth <auth_url>]
-             [--auth-version <auth_version>] [--user <username>]
+             [--auth-version <auth_version> |
+                 --os-identity-api-version <auth_version> ]
+             [--user <username>]
              [--key <api_key>] [--retries <num_retries>]
              [--os-username <auth-user-name>] [--os-password <auth-password>]
              [--os-user-id <auth-user-id>]
@@ -1219,6 +1265,15 @@ Examples:
 
   %prog list --lh
 '''.strip('\n'))
+
+    default_auth_version = '1.0'
+    for k in ('ST_AUTH_VERSION', 'OS_AUTH_VERSION', 'OS_IDENTITY_API_VERSION'):
+        try:
+            default_auth_version = environ[k]
+            break
+        except KeyError:
+            pass
+
     parser.add_option('--os-help', action='store_true', dest='os_help',
                       help='Show OpenStack authentication options.')
     parser.add_option('--os_help', action='store_true', help=SUPPRESS_HELP)
@@ -1237,14 +1292,14 @@ Examples:
     parser.add_option('-A', '--auth', dest='auth',
                       default=environ.get('ST_AUTH'),
                       help='URL for obtaining an auth token.')
-    parser.add_option('-V', '--auth-version',
+    parser.add_option('-V', '--auth-version', '--os-identity-api-version',
                       dest='auth_version',
-                      default=environ.get('ST_AUTH_VERSION',
-                                          (environ.get('OS_AUTH_VERSION',
-                                                       '1.0'))),
+                      default=default_auth_version,
                       type=str,
                       help='Specify a version for authentication. '
-                           'Defaults to 1.0.')
+                           'Defaults to env[ST_AUTH_VERSION], '
+                           'env[OS_AUTH_VERSION], env[OS_IDENTITY_API_VERSION]'
+                           ' or 1.0.')
     parser.add_option('-U', '--user', dest='user',
                       default=environ.get('ST_USER'),
                       help='User name for obtaining an auth token.')
@@ -1414,14 +1469,6 @@ Examples:
         exit()
 
     signal.signal(signal.SIGINT, immediate_exit)
-
-    if options.debug or options.info:
-        logging.getLogger("swiftclient")
-        if options.debug:
-            logging.basicConfig(level=logging.DEBUG)
-            logging.getLogger('iso8601').setLevel(logging.WARNING)
-        elif options.info:
-            logging.basicConfig(level=logging.INFO)
 
     with OutputManager() as output:
 

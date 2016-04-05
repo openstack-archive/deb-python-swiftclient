@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import testtools
+import unittest
 import mock
 import six
 import tempfile
@@ -22,7 +22,7 @@ from hashlib import md5
 from swiftclient import utils as u
 
 
-class TestConfigTrueValue(testtools.TestCase):
+class TestConfigTrueValue(unittest.TestCase):
 
     def test_TRUE_VALUES(self):
         for v in u.TRUE_VALUES:
@@ -37,7 +37,7 @@ class TestConfigTrueValue(testtools.TestCase):
         self.assertIs(u.config_true_value(False), False)
 
 
-class TestPrtBytes(testtools.TestCase):
+class TestPrtBytes(unittest.TestCase):
 
     def test_zero_bytes(self):
         bytes_ = 0
@@ -119,7 +119,7 @@ class TestPrtBytes(testtools.TestCase):
         self.assertEqual('1024Y', u.prt_bytes(bytes_, True).lstrip())
 
 
-class TestTempURL(testtools.TestCase):
+class TestTempURL(unittest.TestCase):
 
     def setUp(self):
         super(TestTempURL, self).setUp()
@@ -164,7 +164,7 @@ class TestTempURL(testtools.TestCase):
                           self.method)
 
 
-class TestReadableToIterable(testtools.TestCase):
+class TestReadableToIterable(unittest.TestCase):
 
     def test_iter(self):
         chunk_size = 4
@@ -216,12 +216,13 @@ class TestReadableToIterable(testtools.TestCase):
             self.assertEqual(actual_md5sum, data.get_md5sum())
 
 
-class TestLengthWrapper(testtools.TestCase):
+class TestLengthWrapper(unittest.TestCase):
 
     def test_stringio(self):
-        contents = six.StringIO(u'a' * 100)
+        contents = six.StringIO(u'a' * 50 + u'b' * 50)
+        contents.seek(22)
         data = u.LengthWrapper(contents, 42, True)
-        s = u'a' * 42
+        s = u'a' * 28 + u'b' * 14
         read_data = u''.join(iter(data.read, ''))
 
         self.assertEqual(42, len(data))
@@ -229,10 +230,19 @@ class TestLengthWrapper(testtools.TestCase):
         self.assertEqual(s, read_data)
         self.assertEqual(md5(s.encode()).hexdigest(), data.get_md5sum())
 
+        data.reset()
+        self.assertEqual(md5().hexdigest(), data.get_md5sum())
+
+        read_data = u''.join(iter(data.read, ''))
+        self.assertEqual(42, len(read_data))
+        self.assertEqual(s, read_data)
+        self.assertEqual(md5(s.encode()).hexdigest(), data.get_md5sum())
+
     def test_bytesio(self):
-        contents = six.BytesIO(b'a' * 100)
+        contents = six.BytesIO(b'a' * 50 + b'b' * 50)
+        contents.seek(22)
         data = u.LengthWrapper(contents, 42, True)
-        s = b'a' * 42
+        s = b'a' * 28 + b'b' * 14
         read_data = b''.join(iter(data.read, ''))
 
         self.assertEqual(42, len(data))
@@ -272,3 +282,39 @@ class TestLengthWrapper(testtools.TestCase):
                 self.assertEqual(segment_length, len(read_data))
                 self.assertEqual(s, read_data)
                 self.assertEqual(md5(s).hexdigest(), data.get_md5sum())
+
+                data.reset()
+                self.assertEqual(md5().hexdigest(), data.get_md5sum())
+                read_data = b''.join(iter(data.read, ''))
+                self.assertEqual(segment_length, len(data))
+                self.assertEqual(segment_length, len(read_data))
+                self.assertEqual(s, read_data)
+                self.assertEqual(md5(s).hexdigest(), data.get_md5sum())
+
+
+class TestGroupers(unittest.TestCase):
+    def test_n_at_a_time(self):
+        result = list(u.n_at_a_time(range(100), 9))
+        self.assertEqual([9] * 11 + [1], list(map(len, result)))
+
+        result = list(u.n_at_a_time(range(100), 10))
+        self.assertEqual([10] * 10, list(map(len, result)))
+
+        result = list(u.n_at_a_time(range(100), 11))
+        self.assertEqual([11] * 9 + [1], list(map(len, result)))
+
+        result = list(u.n_at_a_time(range(100), 12))
+        self.assertEqual([12] * 8 + [4], list(map(len, result)))
+
+    def test_n_groups(self):
+        result = list(u.n_groups(range(100), 9))
+        self.assertEqual([12] * 8 + [4], list(map(len, result)))
+
+        result = list(u.n_groups(range(100), 10))
+        self.assertEqual([10] * 10, list(map(len, result)))
+
+        result = list(u.n_groups(range(100), 11))
+        self.assertEqual([10] * 10, list(map(len, result)))
+
+        result = list(u.n_groups(range(100), 12))
+        self.assertEqual([9] * 11 + [1], list(map(len, result)))

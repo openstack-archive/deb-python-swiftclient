@@ -16,12 +16,12 @@ from __future__ import unicode_literals
 from genericpath import getmtime
 
 import hashlib
+import logging
 import mock
 import os
 import tempfile
-import testtools
+import unittest
 import textwrap
-from testtools import ExpectedException
 
 
 import six
@@ -105,7 +105,7 @@ def _make_cmd(cmd, opts, os_opts, use_env=False, flags=None, cmd_args=None):
 
 
 @mock.patch.dict(os.environ, mocked_os_environ)
-class TestShell(testtools.TestCase):
+class TestShell(unittest.TestCase):
     def setUp(self):
         super(TestShell, self).setUp()
         tmpfile = tempfile.NamedTemporaryFile(delete=False)
@@ -336,15 +336,17 @@ class TestShell(testtools.TestCase):
         with mock.patch(BUILTIN_OPEN) as mock_open:
             argv = ["", "download", "container"]
             swiftclient.shell.main(argv)
-            calls = [mock.call('container', 'object',
-                               headers={}, resp_chunk_size=65536,
-                               response_dict={}),
-                     mock.call('container', 'pseudo/',
-                               headers={}, resp_chunk_size=65536,
-                               response_dict={})]
-            connection.return_value.get_object.assert_has_calls(
-                calls, any_order=True)
-            mock_open.assert_called_once_with('object', 'wb')
+        calls = [mock.call('container', 'object',
+                           headers={}, resp_chunk_size=65536,
+                           response_dict={}),
+                 mock.call('container', 'pseudo/',
+                           headers={}, resp_chunk_size=65536,
+                           response_dict={})]
+        connection.return_value.get_object.assert_has_calls(
+            calls, any_order=True)
+        mock_open.assert_called_once_with('object', 'wb')
+        self.assertEqual([mock.call('pseudo')], makedirs.mock_calls)
+        makedirs.reset_mock()
 
         # Test downloading single object
         objcontent = six.BytesIO(b'objcontent')
@@ -356,10 +358,11 @@ class TestShell(testtools.TestCase):
         with mock.patch(BUILTIN_OPEN) as mock_open:
             argv = ["", "download", "container", "object"]
             swiftclient.shell.main(argv)
-            connection.return_value.get_object.assert_called_with(
-                'container', 'object', headers={}, resp_chunk_size=65536,
-                response_dict={})
-            mock_open.assert_called_with('object', 'wb')
+        connection.return_value.get_object.assert_called_with(
+            'container', 'object', headers={}, resp_chunk_size=65536,
+            response_dict={})
+        mock_open.assert_called_with('object', 'wb')
+        self.assertEqual([], makedirs.mock_calls)
 
         # Test downloading single object to stdout
         objcontent = six.BytesIO(b'objcontent')
@@ -396,13 +399,18 @@ class TestShell(testtools.TestCase):
         ]
 
         with mock.patch(BUILTIN_OPEN) as mock_open:
-            argv = ["", "download", "--all"]
-            swiftclient.shell.main(argv)
-            self.assertEqual(3, mock_shuffle.call_count)
-            mock_shuffle.assert_any_call(['container'])
-            mock_shuffle.assert_any_call(['object'])
-            mock_shuffle.assert_any_call(['pseudo/'])
-            mock_open.assert_called_once_with('container/object', 'wb')
+            with mock.patch('swiftclient.service.makedirs') as mock_mkdir:
+                argv = ["", "download", "--all"]
+                swiftclient.shell.main(argv)
+        self.assertEqual(3, mock_shuffle.call_count)
+        mock_shuffle.assert_any_call(['container'])
+        mock_shuffle.assert_any_call(['object'])
+        mock_shuffle.assert_any_call(['pseudo/'])
+        mock_open.assert_called_once_with('container/object', 'wb')
+        self.assertEqual([
+            mock.call('container'),
+            mock.call('container/pseudo'),
+        ], mock_mkdir.mock_calls)
 
         # Test that the container and object lists are not shuffled
         mock_shuffle.reset_mock()
@@ -418,10 +426,15 @@ class TestShell(testtools.TestCase):
         ]
 
         with mock.patch(BUILTIN_OPEN) as mock_open:
-            argv = ["", "download", "--all", "--no-shuffle"]
-            swiftclient.shell.main(argv)
-            self.assertEqual(0, mock_shuffle.call_count)
-            mock_open.assert_called_once_with('container/object', 'wb')
+            with mock.patch('swiftclient.service.makedirs') as mock_mkdir:
+                argv = ["", "download", "--all", "--no-shuffle"]
+                swiftclient.shell.main(argv)
+        self.assertEqual(0, mock_shuffle.call_count)
+        mock_open.assert_called_once_with('container/object', 'wb')
+        self.assertEqual([
+            mock.call('container'),
+            mock.call('container/pseudo'),
+        ], mock_mkdir.mock_calls)
 
     @mock.patch('swiftclient.service.Connection')
     def test_download_no_content_type(self, connection):
@@ -439,17 +452,21 @@ class TestShell(testtools.TestCase):
         connection.return_value.attempts = 0
 
         with mock.patch(BUILTIN_OPEN) as mock_open:
-            argv = ["", "download", "container"]
-            swiftclient.shell.main(argv)
-            calls = [mock.call('container', 'object',
-                               headers={}, resp_chunk_size=65536,
-                               response_dict={}),
-                     mock.call('container', 'pseudo/',
-                               headers={}, resp_chunk_size=65536,
-                               response_dict={})]
-            connection.return_value.get_object.assert_has_calls(
-                calls, any_order=True)
-            mock_open.assert_called_once_with('object', 'wb')
+            with mock.patch('swiftclient.service.makedirs') as mock_mkdir:
+                argv = ["", "download", "container"]
+                swiftclient.shell.main(argv)
+        calls = [mock.call('container', 'object',
+                           headers={}, resp_chunk_size=65536,
+                           response_dict={}),
+                 mock.call('container', 'pseudo/',
+                           headers={}, resp_chunk_size=65536,
+                           response_dict={})]
+        connection.return_value.get_object.assert_has_calls(
+            calls, any_order=True)
+        mock_open.assert_called_once_with('object', 'wb')
+        self.assertEqual([
+            mock.call('pseudo'),
+        ], mock_mkdir.mock_calls)
 
     @mock.patch('swiftclient.shell.walk')
     @mock.patch('swiftclient.service.Connection')
@@ -463,12 +480,30 @@ class TestShell(testtools.TestCase):
         swiftclient.shell.main(argv)
         connection.return_value.put_container.assert_called_once_with(
             'container',
-            {'X-Storage-Policy': mock.ANY},
+            {'X-Storage-Policy': 'one'},
             response_dict={})
 
         connection.return_value.put_object.assert_called_with(
             'container',
             self.tmpfile.lstrip('/'),
+            mock.ANY,
+            content_length=0,
+            headers={'x-object-meta-mtime': mock.ANY,
+                     'X-Storage-Policy': 'one'},
+            response_dict={})
+
+        # upload to pseudo-folder (via <container> param)
+        argv = ["", "upload", "container/pseudo-folder/nested", self.tmpfile,
+                "-H", "X-Storage-Policy:one"]
+        swiftclient.shell.main(argv)
+        connection.return_value.put_container.assert_called_with(
+            'container',
+            {'X-Storage-Policy': 'one'},
+            response_dict={})
+
+        connection.return_value.put_object.assert_called_with(
+            'container',
+            'pseudo-folder/nested' + self.tmpfile,
             mock.ANY,
             content_length=0,
             headers={'x-object-meta-mtime': mock.ANY,
@@ -512,6 +547,55 @@ class TestShell(testtools.TestCase):
             headers={'x-object-manifest': mock.ANY,
                      'x-object-meta-mtime': mock.ANY},
             response_dict={})
+
+        # upload in segments to pseudo-folder (via <container> param)
+        connection.reset_mock()
+        connection.return_value.head_container.return_value = {
+            'x-storage-policy': 'one'}
+        argv = ["", "upload", "container/pseudo-folder/nested",
+                self.tmpfile, "-S", "10", "--use-slo"]
+        with open(self.tmpfile, "wb") as fh:
+            fh.write(b'12345678901234567890')
+        swiftclient.shell.main(argv)
+        expected_calls = [mock.call('container',
+                                    {},
+                                    response_dict={}),
+                          mock.call('container_segments',
+                                    {'X-Storage-Policy': 'one'},
+                                    response_dict={})]
+        connection.return_value.put_container.assert_has_calls(expected_calls)
+        connection.return_value.put_object.assert_called_with(
+            'container',
+            'pseudo-folder/nested' + self.tmpfile,
+            mock.ANY,
+            headers={
+                'x-object-meta-mtime': mock.ANY,
+                'x-static-large-object': 'true'
+            },
+            query_string='multipart-manifest=put',
+            response_dict={})
+
+    @mock.patch('swiftclient.service.SwiftService.upload')
+    def test_upload_object_with_account_readonly(self, upload):
+        argv = ["", "upload", "container", self.tmpfile]
+        upload.return_value = [
+            {"success": False,
+             "headers": {},
+             "container": 'container',
+             "action": 'create_container',
+             "error": swiftclient.ClientException(
+                 'Container PUT failed',
+                 http_status=403,
+                 http_reason='Forbidden',
+                 http_response_content=b'<html><h1>Forbidden</h1>')
+             }]
+
+        with CaptureOutput() as output:
+            swiftclient.shell.main(argv)
+            self.assertTrue(output.err != '')
+            warning_msg = "Warning: failed to create container 'container': " \
+                          "403 Forbidden"
+            self.assertTrue(output.err.startswith(warning_msg))
 
     @mock.patch('swiftclient.service.Connection')
     def test_upload_delete_slo_segments(self, connection):
@@ -675,25 +759,158 @@ class TestShell(testtools.TestCase):
                      'x-object-meta-mtime': mock.ANY},
             response_dict={})
 
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: False)
     @mock.patch('swiftclient.service.Connection')
     def test_delete_account(self, connection):
         connection.return_value.get_account.side_effect = [
-            [None, [{'name': 'container'}]],
+            [None, [{'name': 'container'}, {'name': 'container2'}]],
+            [None, [{'name': 'empty_container'}]],
             [None, []],
         ]
         connection.return_value.get_container.side_effect = [
+            [None, [{'name': 'object'}, {'name': 'obj\xe9ct2'}]],
+            [None, []],
             [None, [{'name': 'object'}]],
+            [None, []],
             [None, []],
         ]
         connection.return_value.attempts = 0
         argv = ["", "delete", "--all"]
         connection.return_value.head_object.return_value = {}
         swiftclient.shell.main(argv)
-        connection.return_value.delete_container.assert_called_with(
-            'container', response_dict={})
-        connection.return_value.delete_object.assert_called_with(
-            'container', 'object', query_string=None, response_dict={})
+        connection.return_value.delete_object.assert_has_calls([
+            mock.call('container', 'object', query_string=None,
+                      response_dict={}),
+            mock.call('container', 'obj\xe9ct2', query_string=None,
+                      response_dict={}),
+            mock.call('container2', 'object', query_string=None,
+                      response_dict={})], any_order=True)
+        self.assertEqual(3, connection.return_value.delete_object.call_count,
+                         'Expected 3 calls but found\n%r'
+                         % connection.return_value.delete_object.mock_calls)
+        self.assertEqual(
+            connection.return_value.delete_container.mock_calls, [
+                mock.call('container', response_dict={}),
+                mock.call('container2', response_dict={}),
+                mock.call('empty_container', response_dict={})])
 
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: True)
+    @mock.patch('swiftclient.service.Connection')
+    def test_delete_bulk_account(self, connection):
+        connection.return_value.get_account.side_effect = [
+            [None, [{'name': 'container'}, {'name': 'container2'}]],
+            [None, [{'name': 'empty_container'}]],
+            [None, []],
+        ]
+        connection.return_value.get_container.side_effect = [
+            [None, [{'name': 'object'}, {'name': 'obj\xe9ct2'},
+                    {'name': 'object3'}]],
+            [None, []],
+            [None, [{'name': 'object'}]],
+            [None, []],
+            [None, []],
+        ]
+        connection.return_value.attempts = 0
+        argv = ["", "delete", "--all", "--object-threads", "2"]
+        connection.return_value.post_account.return_value = {}, (
+            b'{"Number Not Found": 0, "Response Status": "200 OK", '
+            b'"Errors": [], "Number Deleted": 1, "Response Body": ""}')
+        swiftclient.shell.main(argv)
+        self.assertEqual(
+            3, len(connection.return_value.post_account.mock_calls),
+            'Expected 3 calls but found\n%r'
+            % connection.return_value.post_account.mock_calls)
+        # POSTs for same container are made in parallel so expect any order
+        for expected in [
+            mock.call(query_string='bulk-delete',
+                      data=b'/container/object\n/container/obj%C3%A9ct2\n',
+                      headers={'Content-Type': 'text/plain',
+                               'Accept': 'application/json'},
+                      response_dict={}),
+            mock.call(query_string='bulk-delete',
+                      data=b'/container/object3\n',
+                      headers={'Content-Type': 'text/plain',
+                               'Accept': 'application/json'},
+                      response_dict={})]:
+            self.assertIn(expected,
+                          connection.return_value.post_account.mock_calls[:2])
+        # POSTs for different containers are made sequentially so expect order
+        self.assertEqual(
+            mock.call(query_string='bulk-delete',
+                      data=b'/container2/object\n',
+                      headers={'Content-Type': 'text/plain',
+                               'Accept': 'application/json'},
+                      response_dict={}),
+            connection.return_value.post_account.mock_calls[2])
+        self.assertEqual(
+            connection.return_value.delete_container.mock_calls, [
+                mock.call('container', response_dict={}),
+                mock.call('container2', response_dict={}),
+                mock.call('empty_container', response_dict={})])
+
+    @mock.patch('swiftclient.service.Connection')
+    def test_delete_bulk_account_with_capabilities(self, connection):
+        connection.return_value.get_capabilities.return_value = {
+            'bulk_delete': {
+                'max_deletes_per_request': 10000,
+                'max_failed_deletes': 1000,
+            },
+        }
+        connection.return_value.get_account.side_effect = [
+            [None, [{'name': 'container'}]],
+            [None, [{'name': 'container2'}]],
+            [None, [{'name': 'empty_container'}]],
+            [None, []],
+        ]
+        connection.return_value.get_container.side_effect = [
+            [None, [{'name': 'object'}, {'name': 'obj\xe9ct2'},
+                    {'name': 'z_object'}, {'name': 'z_obj\xe9ct2'}]],
+            [None, []],
+            [None, [{'name': 'object'}, {'name': 'obj\xe9ct2'},
+                    {'name': 'z_object'}, {'name': 'z_obj\xe9ct2'}]],
+            [None, []],
+            [None, []],
+        ]
+        connection.return_value.attempts = 0
+        argv = ["", "delete", "--all", "--object-threads", "1"]
+        connection.return_value.post_account.return_value = {}, (
+            b'{"Number Not Found": 0, "Response Status": "200 OK", '
+            b'"Errors": [], "Number Deleted": 1, "Response Body": ""}')
+        swiftclient.shell.main(argv)
+        self.assertEqual(
+            connection.return_value.post_account.mock_calls, [
+                mock.call(query_string='bulk-delete',
+                          data=b''.join([
+                              b'/container/object\n',
+                              b'/container/obj%C3%A9ct2\n',
+                              b'/container/z_object\n',
+                              b'/container/z_obj%C3%A9ct2\n'
+                          ]),
+                          headers={'Content-Type': 'text/plain',
+                                   'Accept': 'application/json'},
+                          response_dict={}),
+                mock.call(query_string='bulk-delete',
+                          data=b''.join([
+                              b'/container2/object\n',
+                              b'/container2/obj%C3%A9ct2\n',
+                              b'/container2/z_object\n',
+                              b'/container2/z_obj%C3%A9ct2\n'
+                          ]),
+                          headers={'Content-Type': 'text/plain',
+                                   'Accept': 'application/json'},
+                          response_dict={})])
+        self.assertEqual(
+            connection.return_value.delete_container.mock_calls, [
+                mock.call('container', response_dict={}),
+                mock.call('container2', response_dict={}),
+                mock.call('empty_container', response_dict={})])
+        self.assertEqual(connection.return_value.get_capabilities.mock_calls,
+                         [mock.call(None)])  # only one /info request
+
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: False)
     @mock.patch('swiftclient.service.Connection')
     def test_delete_container(self, connection):
         connection.return_value.get_container.side_effect = [
@@ -708,6 +925,28 @@ class TestShell(testtools.TestCase):
             'container', response_dict={})
         connection.return_value.delete_object.assert_called_with(
             'container', 'object', query_string=None, response_dict={})
+
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: True)
+    @mock.patch('swiftclient.service.Connection')
+    def test_delete_bulk_container(self, connection):
+        connection.return_value.get_container.side_effect = [
+            [None, [{'name': 'object'}]],
+            [None, []],
+        ]
+        connection.return_value.attempts = 0
+        argv = ["", "delete", "container"]
+        connection.return_value.post_account.return_value = {}, (
+            b'{"Number Not Found": 0, "Response Status": "200 OK", '
+            b'"Errors": [], "Number Deleted": 1, "Response Body": ""}')
+        swiftclient.shell.main(argv)
+        connection.return_value.post_account.assert_called_with(
+            query_string='bulk-delete', data=b'/container/object\n',
+            headers={'Content-Type': 'text/plain',
+                     'Accept': 'application/json'},
+            response_dict={})
+        connection.return_value.delete_container.assert_called_with(
+            'container', response_dict={})
 
     def test_delete_verbose_output_utf8(self):
         container = 't\u00e9st_c'
@@ -741,14 +980,32 @@ class TestShell(testtools.TestCase):
                 self.assertTrue(out.out.find(
                     't\u00e9st_c [after 2 attempts]') >= 0, out)
 
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: False)
     @mock.patch('swiftclient.service.Connection')
-    def test_delete_object(self, connection):
+    def test_delete_per_object(self, connection):
         argv = ["", "delete", "container", "object"]
         connection.return_value.head_object.return_value = {}
         connection.return_value.attempts = 0
         swiftclient.shell.main(argv)
         connection.return_value.delete_object.assert_called_with(
             'container', 'object', query_string=None, response_dict={})
+
+    @mock.patch.object(swiftclient.service.SwiftService, '_should_bulk_delete',
+                       lambda *a: True)
+    @mock.patch('swiftclient.service.Connection')
+    def test_delete_bulk_object(self, connection):
+        argv = ["", "delete", "container", "object"]
+        connection.return_value.post_account.return_value = {}, (
+            b'{"Number Not Found": 0, "Response Status": "200 OK", '
+            b'"Errors": [], "Number Deleted": 1, "Response Body": ""}')
+        connection.return_value.attempts = 0
+        swiftclient.shell.main(argv)
+        connection.return_value.post_account.assert_called_with(
+            query_string='bulk-delete', data=b'/container/object\n',
+            headers={'Content-Type': 'text/plain',
+                     'Accept': 'application/json'},
+            response_dict={})
 
     def test_delete_verbose_output(self):
         del_obj_res = {'success': True, 'response_dict': {}, 'attempts': 2,
@@ -819,7 +1076,7 @@ class TestShell(testtools.TestCase):
             swiftclient.ClientException('bad auth')
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
 
             self.assertEqual(output.err, 'bad auth\n')
@@ -831,7 +1088,7 @@ class TestShell(testtools.TestCase):
             swiftclient.ClientException('test', http_status=404)
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
 
             self.assertEqual(output.err, 'Account not found\n')
@@ -850,7 +1107,7 @@ class TestShell(testtools.TestCase):
             swiftclient.ClientException('bad auth')
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
 
             self.assertEqual(output.err, 'bad auth\n')
@@ -868,7 +1125,7 @@ class TestShell(testtools.TestCase):
         argv = ["", "post", "conta/iner"]
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
             self.assertTrue(output.err != '')
             self.assertTrue(output.err.startswith('WARNING: / in'))
@@ -908,7 +1165,7 @@ class TestShell(testtools.TestCase):
             swiftclient.ClientException("bad auth")
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
 
             self.assertEqual(output.err, 'bad auth\n')
@@ -917,7 +1174,7 @@ class TestShell(testtools.TestCase):
         argv = ["", "post", "container", "object", "bad_arg"]
 
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 swiftclient.shell.main(argv)
 
             self.assertTrue(output.err != '')
@@ -978,49 +1235,49 @@ class TestShell(testtools.TestCase):
                 _check_expected(mock_swift, 12345)
 
             with CaptureOutput() as output:
-                with ExpectedException(SystemExit):
+                with self.assertRaises(SystemExit):
                     #  Test invalid states
                     argv = ["", "upload", "-S", "1234X", "container", "object"]
                     swiftclient.shell.main(argv)
                 self.assertEqual(output.err, "Invalid segment size\n")
                 output.clear()
 
-                with ExpectedException(SystemExit):
+                with self.assertRaises(SystemExit):
                     argv = ["", "upload", "-S", "K1234", "container", "object"]
                     swiftclient.shell.main(argv)
                 self.assertEqual(output.err, "Invalid segment size\n")
                 output.clear()
 
-                with ExpectedException(SystemExit):
+                with self.assertRaises(SystemExit):
                     argv = ["", "upload", "-S", "K", "container", "object"]
                     swiftclient.shell.main(argv)
                 self.assertEqual(output.err, "Invalid segment size\n")
 
     def test_negative_upload_segment_size(self):
         with CaptureOutput() as output:
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 argv = ["", "upload", "-S", "-40", "container", "object"]
                 swiftclient.shell.main(argv)
             self.assertEqual(output.err, "segment-size should be positive\n")
             output.clear()
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 argv = ["", "upload", "-S", "-40K", "container", "object"]
                 swiftclient.shell.main(argv)
             self.assertEqual(output.err, "segment-size should be positive\n")
             output.clear()
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 argv = ["", "upload", "-S", "-40M", "container", "object"]
                 swiftclient.shell.main(argv)
             self.assertEqual(output.err, "segment-size should be positive\n")
             output.clear()
-            with ExpectedException(SystemExit):
+            with self.assertRaises(SystemExit):
                 argv = ["", "upload", "-S", "-40G", "container", "object"]
                 swiftclient.shell.main(argv)
             self.assertEqual(output.err, "segment-size should be positive\n")
             output.clear()
 
 
-class TestSubcommandHelp(testtools.TestCase):
+class TestSubcommandHelp(unittest.TestCase):
 
     def test_subcommand_help(self):
         for command in swiftclient.shell.commands:
@@ -1040,7 +1297,39 @@ class TestSubcommandHelp(testtools.TestCase):
         self.assertEqual(out.strip('\n'), expected)
 
 
-class TestBase(testtools.TestCase):
+@mock.patch.dict(os.environ, mocked_os_environ)
+class TestDebugAndInfoOptions(unittest.TestCase):
+    @mock.patch('logging.basicConfig')
+    @mock.patch('swiftclient.service.Connection')
+    def test_option_after_posarg(self, connection, mock_logging):
+        argv = ["", "stat", "--info"]
+        swiftclient.shell.main(argv)
+        mock_logging.assert_called_with(level=logging.INFO)
+
+        argv = ["", "stat", "--debug"]
+        swiftclient.shell.main(argv)
+        mock_logging.assert_called_with(level=logging.DEBUG)
+
+    @mock.patch('logging.basicConfig')
+    @mock.patch('swiftclient.service.Connection')
+    def test_debug_trumps_info(self, connection, mock_logging):
+        argv_scenarios = (["", "stat", "--info", "--debug"],
+                          ["", "stat", "--debug", "--info"],
+                          ["", "--info", "stat", "--debug"],
+                          ["", "--debug", "stat", "--info"],
+                          ["", "--info", "--debug", "stat"],
+                          ["", "--debug", "--info", "stat"])
+        for argv in argv_scenarios:
+            mock_logging.reset_mock()
+            swiftclient.shell.main(argv)
+            try:
+                mock_logging.assert_called_once_with(level=logging.DEBUG)
+            except AssertionError:
+                self.fail('Unexpected call(s) %r for args %r'
+                          % (mock_logging.call_args_list, argv))
+
+
+class TestBase(unittest.TestCase):
     """
     Provide some common methods to subclasses
     """
@@ -1071,22 +1360,25 @@ class TestParsing(TestBase):
             result[0], result[1] = swiftclient.shell.parse_args(parser, args)
         return fake_command
 
-    def _verify_opts(self, actual_opts, opts, os_opts={}, os_opts_dict={}):
+    def _verify_opts(self, actual_opts, expected_opts, expected_os_opts=None,
+                     expected_os_opts_dict=None):
         """
         Check parsed options are correct.
 
-        :param opts: v1 style options.
-        :param os_opts: openstack style options.
-        :param os_opts_dict: openstack options that should be found in the
-                             os_options dict.
+        :param expected_opts: v1 style options.
+        :param expected_os_opts: openstack style options.
+        :param expected_os_opts_dict: openstack options that should be found in
+                                      the os_options dict.
         """
+        expected_os_opts = expected_os_opts or {}
+        expected_os_opts_dict = expected_os_opts_dict or {}
         # check the expected opts are set
-        for key, v in opts.items():
+        for key, v in expected_opts.items():
             actual = getattr(actual_opts, key)
             self.assertEqual(v, actual, 'Expected %s for key %s, found %s' %
                              (v, key, actual))
 
-        for key, v in os_opts.items():
+        for key, v in expected_os_opts.items():
             actual = getattr(actual_opts, "os_" + key)
             self.assertEqual(v, actual, 'Expected %s for key %s, found %s' %
                              (v, key, actual))
@@ -1107,8 +1399,8 @@ class TestParsing(TestBase):
             if key == 'object_storage_url':
                 # exceptions to the pattern...
                 cli_key = 'storage_url'
-            if cli_key in os_opts_dict:
-                expect = os_opts_dict[cli_key]
+            if cli_key in expected_os_opts_dict:
+                expect = expected_os_opts_dict[cli_key]
             else:
                 expect = None
             actual = actual_os_opts_dict[key]
@@ -1165,6 +1457,89 @@ class TestParsing(TestBase):
         with mock.patch('swiftclient.shell.st_stat', fake_command):
             swiftclient.shell.main(args)
         self._verify_opts(result[0], opts, os_opts, os_opts_dict)
+
+    def test_os_identity_api_version(self):
+        os_opts = {"password": "secret",
+                   "username": "user",
+                   "auth_url": "http://example.com:5000/v3",
+                   "identity-api-version": "3"}
+
+        # check os_identity_api_version is sufficient in place of auth_version
+        args = _make_args("stat", {}, os_opts, '-')
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, {}):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        expected_opts = {'auth_version': '3'}
+        expected_os_opts = {"password": "secret",
+                            "username": "user",
+                            "auth_url": "http://example.com:5000/v3"}
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # check again using environment variables
+        args = _make_args("stat", {}, {})
+        env = _make_env({}, os_opts)
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, env):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # check that last of auth-version, os-identity-api-version is preferred
+        args = _make_args("stat", {}, os_opts, '-') + ['--auth-version', '2.0']
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, {}):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        expected_opts = {'auth_version': '2.0'}
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # now put auth_version ahead of os-identity-api-version
+        args = _make_args("stat", {"auth_version": "2.0"}, os_opts, '-')
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, {}):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        expected_opts = {'auth_version': '3'}
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # check that OS_AUTH_VERSION overrides OS_IDENTITY_API_VERSION
+        args = _make_args("stat", {}, {})
+        env = _make_env({}, os_opts)
+        env.update({'OS_AUTH_VERSION': '2.0'})
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, env):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        expected_opts = {'auth_version': '2.0'}
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # check that ST_AUTH_VERSION overrides OS_IDENTITY_API_VERSION
+        args = _make_args("stat", {}, {})
+        env = _make_env({}, os_opts)
+        env.update({'ST_AUTH_VERSION': '2.0'})
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, env):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
+
+        # check that ST_AUTH_VERSION overrides OS_AUTH_VERSION
+        args = _make_args("stat", {}, {})
+        env = _make_env({}, os_opts)
+        env.update({'ST_AUTH_VERSION': '2.0', 'OS_AUTH_VERSION': '3'})
+        result = [None, None]
+        fake_command = self._make_fake_command(result)
+        with mock.patch.dict(os.environ, env):
+            with mock.patch('swiftclient.shell.st_stat', fake_command):
+                swiftclient.shell.main(args)
+        self._verify_opts(result[0], expected_opts, expected_os_opts, {})
 
     def test_args_v3(self):
         opts = {"auth_version": "3"}
@@ -1450,6 +1825,7 @@ class TestKeystoneOptions(MockHttpTest):
             self.assertTrue(flag in actual_args)
             self.assertTrue(actual_args[flag])
 
+        check_attr = True
         # check args passed to ServiceCatalog.url_for() method
         self.assertEqual(len(fake_ks.client.service_catalog.calls), 1)
         actual_args = fake_ks.client.service_catalog.calls[0]
@@ -1458,15 +1834,21 @@ class TestKeystoneOptions(MockHttpTest):
             key = key.replace('-', '_')
             if key == 'region_name':
                 key = 'filter_value'
+                if expected is None:
+                    check_attr = False
+                    self.assertNotIn(key, actual_args)
+                    self.assertNotIn('attr', actual_args)
+                    continue
             self.assertIn(key, actual_args)
             self.assertEqual(expected, actual_args[key],
                              'Expected %s for key %s, found %s'
                              % (expected, key, actual_args[key]))
-        key, v = 'attr', 'region'
-        self.assertIn(key, actual_args)
-        self.assertEqual(v, actual_args[key],
-                         'Expected %s for key %s, found %s'
-                         % (v, key, actual_args[key]))
+        if check_attr:
+            key, v = 'attr', 'region'
+            self.assertIn(key, actual_args)
+            self.assertEqual(v, actual_args[key],
+                             'Expected %s for key %s, found %s'
+                             % (v, key, actual_args[key]))
 
     def _test_options(self, opts, os_opts, flags=None, no_auth=False):
         # repeat test for different commands using env and command line options
@@ -1891,6 +2273,53 @@ class TestCrossAccountObjectAccess(TestBase, MockHttpTest):
         self.assertTrue(self.obj[1:] in out.out)
         expected_err = "Warning: failed to create container '%s': 403 Fake" \
                        % self.cont
+        self.assertEqual(expected_err, out.err.strip())
+
+    def test_segment_upload_with_write_only_access_segments_container(self):
+        fake_conn = self.fake_http_connection(
+            403,  # PUT c1
+            # HEAD c1 to get storage policy
+            StubResponse(200, headers={'X-Storage-Policy': 'foo'}),
+            403,  # PUT c1_segments
+            201,  # PUT c1_segments/...00
+            201,  # PUT c1_segments/...01
+            201,  # PUT c1/...
+        )
+
+        args, env = self._make_cmd('upload',
+                                   cmd_args=[self.cont, self.obj,
+                                             '--leave-segments',
+                                             '--segment-size=10'])
+        with mock.patch('swiftclient.client._import_keystone_client',
+                        self.fake_ks_import):
+            with mock.patch('swiftclient.client.http_connection', fake_conn):
+                with mock.patch.dict(os.environ, env):
+                    with CaptureOutput() as out:
+                        try:
+                            swiftclient.shell.main(args)
+                        except SystemExit as e:
+                            self.fail('Unexpected SystemExit: %s' % e)
+
+        segment_time = getmtime(self.obj)
+        segment_path_0 = '%s_segments%s/%f/20/10/00000000' % (
+            self.cont_path, self.obj, segment_time)
+        segment_path_1 = '%s_segments%s/%f/20/10/00000001' % (
+            self.cont_path, self.obj, segment_time)
+        # Note that the order of segment PUTs cannot be asserted, so test for
+        # existence in request log individually
+        self.assert_request(('PUT', self.cont_path))
+        self.assert_request(('PUT', self.cont_path + '_segments', '', {
+            'X-Auth-Token': 'bob_token',
+            'X-Storage-Policy': 'foo',
+            'Content-Length': '0',
+        }))
+        self.assert_request(('PUT', segment_path_0))
+        self.assert_request(('PUT', segment_path_1))
+        self.assert_request(('PUT', self.obj_path))
+        self.assertTrue(self.obj[1:] in out.out)
+        expected_err = ("Warning: failed to create container '%s': 403 Fake\n"
+                        "Warning: failed to create container '%s': 403 Fake"
+                        ) % (self.cont, self.cont + '_segments')
         self.assertEqual(expected_err, out.err.strip())
 
     def test_upload_with_no_access(self):

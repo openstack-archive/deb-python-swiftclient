@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import os
-import testtools
+import unittest
 import time
 from io import BytesIO
 
@@ -23,7 +23,7 @@ from six.moves import configparser
 import swiftclient
 
 
-class TestFunctional(testtools.TestCase):
+class TestFunctional(unittest.TestCase):
 
     def __init__(self, *args, **kwargs):
         super(TestFunctional, self).__init__(*args, **kwargs)
@@ -317,6 +317,73 @@ class TestFunctional(testtools.TestCase):
         self.assertEqual(num_bytes, len(downloaded_contents))
         downloaded_contents += body.read()
         self.assertEqual(self.test_data, downloaded_contents)
+
+    def test_put_object_using_generator(self):
+        # verify that put using a generator yielding empty strings does not
+        # cause connection to be closed
+        def data():
+            yield "should"
+            yield ""
+            yield " tolerate"
+            yield ""
+            yield " empty chunks"
+
+        self.conn.put_object(
+            self.containername, self.objectname, data())
+        hdrs, body = self.conn.get_object(self.containername, self.objectname)
+        self.assertEqual("should tolerate empty chunks", body)
+
+    def test_download_object_retry_chunked(self):
+        resp_chunk_size = 2
+        hdrs, body = self.conn.get_object(self.containername,
+                                          self.objectname,
+                                          resp_chunk_size=resp_chunk_size)
+        data = next(body)
+        self.assertEqual(self.test_data[:resp_chunk_size], data)
+        self.assertTrue(1, self.conn.attempts)
+        for chunk in body.resp:
+            # Flush remaining data from underlying response
+            # (simulate a dropped connection)
+            pass
+        # Trigger the retry
+        for chunk in body:
+            data += chunk
+        self.assertEqual(self.test_data, data)
+        self.assertEqual(2, self.conn.attempts)
+
+    def test_download_object_retry_chunked_auth_failure(self):
+        resp_chunk_size = 2
+        self.conn.token = 'invalid'
+        hdrs, body = self.conn.get_object(self.containername,
+                                          self.objectname,
+                                          resp_chunk_size=resp_chunk_size)
+        self.assertEqual(2, self.conn.attempts)
+        for chunk in body.resp:
+            # Flush remaining data from underlying response
+            # (simulate a dropped connection)
+            pass
+
+        self.conn.token = 'invalid'
+        data = next(body)
+        self.assertEqual(4, self.conn.attempts)
+
+        for chunk in body:
+            data += chunk
+
+        self.assertEqual(self.test_data, data)
+        self.assertEqual(4, self.conn.attempts)
+
+    def test_download_object_non_chunked(self):
+        hdrs, body = self.conn.get_object(self.containername, self.objectname)
+        data = body
+        self.assertEqual(self.test_data, data)
+        self.assertTrue(1, self.conn.attempts)
+
+        hdrs, body = self.conn.get_object(self.containername, self.objectname,
+                                          resp_chunk_size=0)
+        data = body
+        self.assertEqual(self.test_data, data)
+        self.assertTrue(1, self.conn.attempts)
 
     def test_post_account(self):
         self.conn.post_account({'x-account-meta-data': 'Something'})

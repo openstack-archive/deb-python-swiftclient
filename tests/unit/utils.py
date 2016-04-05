@@ -18,7 +18,6 @@ from requests import RequestException
 from requests.structures import CaseInsensitiveDict
 from time import sleep
 import unittest
-import testtools
 import mock
 import six
 from six.moves import reload_module
@@ -100,26 +99,10 @@ def fake_http_connect(*code_iter, **kwargs):
             self._is_closed = True
             self.headers = headers or {}
 
-        def connect(self):
-            self._is_closed = False
-
-        def close(self):
-            self._is_closed = True
-
-        def isclosed(self):
-            return self._is_closed
-
         def getresponse(self):
             if kwargs.get('raise_exc'):
                 raise Exception('test')
             return self
-
-        def getexpect(self):
-            if self.status == -2:
-                raise RequestException()
-            if self.status == -3:
-                return FakeConn(507)
-            return FakeConn(100)
 
         def getheaders(self):
             if self.headers:
@@ -199,21 +182,20 @@ def fake_http_connect(*code_iter, **kwargs):
                                  timestamp=timestamp)
         if fake_conn.status <= 0:
             raise RequestException()
-        fake_conn.connect()
         return fake_conn
 
     connect.code_iter = code_iter
     return connect
 
 
-class MockHttpTest(testtools.TestCase):
+class MockHttpTest(unittest.TestCase):
 
     def setUp(self):
         super(MockHttpTest, self).setUp()
         self.fake_connect = None
         self.request_log = []
 
-        # Capture output, since the test-runner stdout/stderr moneky-patching
+        # Capture output, since the test-runner stdout/stderr monkey-patching
         # won't cover the references to sys.stdout/sys.stderr in
         # swiftclient.multithreading
         self.capture_output = CaptureOutput()
@@ -250,7 +232,6 @@ class MockHttpTest(testtools.TestCase):
                     self.request_log.append((parsed, method, url, args,
                                              kwargs, conn.resp))
                     conn.host = conn.resp.host
-                    conn.isclosed = conn.resp.isclosed
                     conn.resp.has_been_read = False
                     _orig_read = conn.resp.read
 
@@ -517,8 +498,8 @@ class FakeKeystone(object):
         self.token = token
 
     class _Client(object):
-        def __init__(self, endpoint, token, **kwargs):
-            self.auth_token = token
+        def __init__(self, endpoint, auth_token, **kwargs):
+            self.auth_token = auth_token
             self.endpoint = endpoint
             self.service_catalog = self.ServiceCatalog(endpoint)
 
@@ -533,8 +514,8 @@ class FakeKeystone(object):
 
     def Client(self, **kwargs):
         self.calls.append(kwargs)
-        self.client = self._Client(endpoint=self.endpoint, token=self.token,
-                                   **kwargs)
+        self.client = self._Client(
+            endpoint=self.endpoint, auth_token=self.token, **kwargs)
         return self.client
 
     class Unauthorized(Exception):
