@@ -1,8 +1,8 @@
-python-swiftclient (1:3.0.0-2) UNRELEASED; urgency=medium
+python-swiftclient (1:3.0.0-2) unstable; urgency=medium
 
   * Added git to Build-Depends-Indep
 
- -- Ondřej Nový <novy@ondrej.org>  Wed, 06 Apr 2016 10:35:35 +0200
+ -- Ondřej Nový <novy@ondrej.org>  Wed, 06 Apr 2016 11:21:52 +0200
 
 python-swiftclient (1:3.0.0-1) unstable; urgency=medium
 
