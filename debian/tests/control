@@ -2,7 +2,7 @@ Tests: client
 Depends: python-swiftclient, python3-swiftclient
 
 Depends: python-swiftclient
-Test-Command: python -c "import swiftclient; print swiftclient.__version__"
+Test-Command: cd "$ADTTMP" ; python -c "import swiftclient; print swiftclient.__version__"
 
 Depends: python3-swiftclient
-Test-Command: python3 -c "import swiftclient; print(swiftclient.__version__)"
+Test-Command: cd "$ADTTMP" ; python3 -c "import swiftclient; print(swiftclient.__version__)"

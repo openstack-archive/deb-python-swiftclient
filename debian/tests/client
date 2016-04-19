@@ -4,6 +4,8 @@
 #-------------------------
 set -e
 
+cd "$ADTTMP"
+
 HELP_CLIENTS=('swift' 'python2-swift' 'python3-swift')
 for client in "${HELP_CLIENTS[@]}"; do
     if ! $client -h 2>&1 > /dev/null; then
