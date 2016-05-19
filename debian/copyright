@@ -1,6 +1,6 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: python-swiftclient
-Source: http://github.com/openstack/python-swiftclient.git
+Source: https://github.com/openstack/python-swiftclient.git
 
 Files: *
 Copyright: (c) 2010-2016, See AUTHORS file
