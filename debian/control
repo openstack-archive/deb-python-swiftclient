@@ -108,7 +108,7 @@ Package: python-swiftclient-doc
 Section: doc
 Architecture: all
 Depends: ${misc:Depends},
-         ${python3:Depends},
+         ${sphinxdoc:Depends},
 Breaks: python-swiftclient (<< 1:2.4.0-2~)
 Replaces: python-swiftclient (<< 1:2.4.0-2~)
 Description: Client library for Openstack Swift API - doc
