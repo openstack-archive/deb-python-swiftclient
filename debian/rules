@@ -4,7 +4,6 @@ PYTHONS:=$(shell pyversions -vr)
 PYTHON3S:=$(shell py3versions -vr)
 
 include /usr/share/openstack-pkg-tools/pkgos.make
-export OSLO_PACKAGE_VERSION=$(VERSION)
 
 %:
 	dh $@  --with python2,python3,sphinxdoc
