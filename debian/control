@@ -4,7 +4,7 @@ Priority: extra
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
 Uploaders: Thomas Goirand <zigo@debian.org>,
            Corey Bryant <corey.bryant@canonical.com>,
-           Ondřej Nový <novy@ondrej.org>,
+           Ondřej Nový <onovy@debian.org>,
 Build-Depends: debhelper (>= 9),
                dh-python,
                openstack-pkg-tools (>= 48~),
