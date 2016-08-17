@@ -1,0 +1,9 @@
+Code-Review+2: Alistair Coles <alistair.coles@hpe.com>
+Code-Review+2: Matthew Oliver <matt@oliver.net.au>
+Workflow+1: Matthew Oliver <matt@oliver.net.au>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Sun, 07 Aug 2016 23:43:13 +0000
+Reviewed-on: https://review.openstack.org/335615
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

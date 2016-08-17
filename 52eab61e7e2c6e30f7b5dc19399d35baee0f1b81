@@ -1,0 +1,10 @@
+Code-Review+2: Alistair Coles <alistair.coles@hpe.com>
+Code-Review+1: Steve Martinelli <s.martinelli@gmail.com>
+Code-Review+2: Christian Schwede <cschwede@redhat.com>
+Workflow+1: Christian Schwede <cschwede@redhat.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 21 Mar 2016 16:41:25 +0000
+Reviewed-on: https://review.openstack.org/254346
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

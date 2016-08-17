@@ -1,0 +1,9 @@
+Code-Review+2: Christian Schwede <cschwede@redhat.com>
+Code-Review+2: Joel Wright <joel.wright@sohonet.com>
+Workflow+1: Joel Wright <joel.wright@sohonet.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Sat, 04 Jun 2016 02:20:33 +0000
+Reviewed-on: https://review.openstack.org/324148
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

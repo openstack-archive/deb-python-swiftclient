@@ -1,0 +1,9 @@
+Code-Review+2: Clay Gerrard <clay.gerrard@gmail.com>
+Workflow+1: Clay Gerrard <clay.gerrard@gmail.com>
+Code-Review+2: Thiago da Silva <thiago@redhat.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Fri, 29 Apr 2016 20:18:32 +0000
+Reviewed-on: https://review.openstack.org/288566
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

@@ -1,0 +1,10 @@
+Code-Review+1: Thai Tran <tqtran@us.ibm.com>
+Code-Review+2: Tim Burke <tim@swiftstack.com>
+Code-Review+2: Joel Wright <joel.wright@sohonet.com>
+Workflow+1: Joel Wright <joel.wright@sohonet.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Wed, 18 May 2016 14:45:46 +0000
+Reviewed-on: https://review.openstack.org/315878
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

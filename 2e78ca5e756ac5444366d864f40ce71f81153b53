@@ -1,0 +1,10 @@
+Code-Review+1: Paul Dardeau <paul.dardeau@intel.com>
+Code-Review+2: Christian Schwede <cschwede@redhat.com>
+Workflow+1: Christian Schwede <cschwede@redhat.com>
+Code-Review+1: Mohit Motiani <mohit.motiani@intel.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Wed, 01 Jun 2016 20:06:10 +0000
+Reviewed-on: https://review.openstack.org/323975
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

@@ -1,0 +1,9 @@
+Code-Review+2: Tim Burke <tim@swiftstack.com>
+Code-Review+2: Pete Zaitcev <zaitcev@kotori.zaitcev.us>
+Workflow+1: Tim Burke <tim@swiftstack.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Thu, 19 May 2016 22:20:17 +0000
+Reviewed-on: https://review.openstack.org/303863
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

@@ -1,0 +1,9 @@
+Code-Review+2: Pete Zaitcev <zaitcev@kotori.zaitcev.us>
+Code-Review+2: Joel Wright <joel.wright@sohonet.com>
+Workflow+1: Joel Wright <joel.wright@sohonet.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 02 May 2016 10:35:20 +0000
+Reviewed-on: https://review.openstack.org/303610
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master

@@ -1,0 +1,9 @@
+Code-Review+2: Alistair Coles <alistair.coles@hpe.com>
+Code-Review+2: Tim Burke <tim@swiftstack.com>
+Workflow+1: Tim Burke <tim@swiftstack.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Thu, 17 Mar 2016 18:38:38 +0000
+Reviewed-on: https://review.openstack.org/293974
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master
