@@ -16,11 +16,12 @@
 
 from __future__ import print_function, unicode_literals
 
+import argparse
+import json
 import logging
 import signal
 import socket
 
-from optparse import OptionParser, OptionGroup, SUPPRESS_HELP
 from os import environ, walk, _exit as os_exit
 from os.path import isfile, isdir, join
 from six import text_type, PY2
@@ -33,9 +34,10 @@ from swiftclient.utils import config_true_value, generate_temp_url, prt_bytes
 from swiftclient.multithreading import OutputManager
 from swiftclient.exceptions import ClientException
 from swiftclient import __version__ as client_version
-from swiftclient.client import logger_settings as client_logger_settings
+from swiftclient.client import logger_settings as client_logger_settings, \
+    parse_header_string
 from swiftclient.service import SwiftService, SwiftError, \
-    SwiftUploadObject, get_conn
+    SwiftUploadObject, get_conn, process_options
 from swiftclient.command_helpers import print_account_stats, \
     print_container_stats, print_object_stats
 
@@ -45,7 +47,7 @@ except ImportError:
     from pipes import quote as sh_quote
 
 BASENAME = 'swift'
-commands = ('delete', 'download', 'list', 'post', 'stat', 'upload',
+commands = ('delete', 'download', 'list', 'post', 'copy', 'stat', 'upload',
             'capabilities', 'info', 'tempurl', 'auth')
 
 
@@ -80,35 +82,50 @@ Optional arguments:
 
 
 def st_delete(parser, args, output_manager):
-    parser.add_option(
+    parser.add_argument(
         '-a', '--all', action='store_true', dest='yes_all',
         default=False, help='Delete all containers and objects.')
-    parser.add_option(
+    parser.add_argument(
         '-p', '--prefix', dest='prefix',
         help='Only delete items beginning with the <prefix>.')
-    parser.add_option(
-        '', '--leave-segments', action='store_true',
+    parser.add_argument(
+        '--leave-segments', action='store_true',
         dest='leave_segments', default=False,
         help='Do not delete segments of manifest objects.')
-    parser.add_option(
-        '', '--object-threads', type=int,
+    parser.add_argument(
+        '--object-threads', type=int,
         default=10, help='Number of threads to use for deleting objects. '
-        'Default is 10.')
-    parser.add_option(
-        '', '--container-threads', type=int,
+        'Its value must be a positive integer. Default is 10.')
+    parser.add_argument(
+        '--container-threads', type=int,
         default=10, help='Number of threads to use for deleting containers. '
-        'Default is 10.')
+        'Its value must be a positive integer. Default is 10.')
     (options, args) = parse_args(parser, args)
     args = args[1:]
-    if (not args and not options.yes_all) or (args and options.yes_all):
+    if (not args and not options['yes_all']) or (args and options['yes_all']):
         output_manager.error('Usage: %s delete %s\n%s',
                              BASENAME, st_delete_options,
                              st_delete_help)
         return
 
-    _opts = vars(options)
-    _opts['object_dd_threads'] = options.object_threads
-    with SwiftService(options=_opts) as swift:
+    if options['object_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --object-threads should be a positive integer.'
+            '\n\nUsage: %s delete %s\n%s',
+            BASENAME, st_delete_options,
+            st_delete_help)
+        return
+
+    if options['container_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --container-threads should be a positive integer.'
+            '\n\nUsage: %s delete %s\n%s',
+            BASENAME, st_delete_options,
+            st_delete_help)
+        return
+
+    options['object_dd_threads'] = options['object_threads']
+    with SwiftService(options=options) as swift:
         try:
             if not args:
                 del_iter = swift.delete()
@@ -152,7 +169,7 @@ def st_delete(parser, args, output_manager):
                                 pass
 
                         for o in objs:
-                            if options.yes_all:
+                            if options['yes_all']:
                                 p = '{0}/{1}'.format(c, o)
                             else:
                                 p = o
@@ -163,12 +180,12 @@ def st_delete(parser, args, output_manager):
                                                  .format(c, o, r['error']))
                 else:
                     if r['success']:
-                        if options.verbose:
+                        if options['verbose']:
                             a = (' [after {0} attempts]'.format(a)
                                  if a > 1 else '')
 
                             if r['action'] == 'delete_object':
-                                if options.yes_all:
+                                if options['yes_all']:
                                     p = '{0}/{1}'.format(c, o)
                                 else:
                                     p = o
@@ -186,9 +203,9 @@ def st_delete(parser, args, output_manager):
             output_manager.error(err.value)
 
 
-st_download_options = '''[--all] [--marker] [--prefix <prefix>]
+st_download_options = '''[--all] [--marker <marker>] [--prefix <prefix>]
                       [--output <out_file>] [--output-dir <out_directory>]
-                      [--object-threads <threads>]
+                      [--object-threads <threads>] [--ignore-checksum]
                       [--container-threads <threads>] [--no-download]
                       [--skip-identical] [--remove-prefix]
                       [--header <header:value>] [--no-shuffle]
@@ -208,7 +225,7 @@ Positional arguments:
 Optional arguments:
   -a, --all             Indicates that you really want to download
                         everything in the account.
-  -m, --marker          Marker to use when starting a container or account
+  -m, --marker <marker> Marker to use when starting a container or account
                         download.
   -p, --prefix <prefix> Only download items beginning with <prefix>
   -r, --remove-prefix   An optional flag for --prefix <prefix>, use this
@@ -232,12 +249,13 @@ Optional arguments:
   -H, --header <header:value>
                         Adds a customized request header to the query, like
                         "Range" or "If-Match". This option may be repeated.
-                        Example --header "content-type:text/plain"
+                        Example: --header "content-type:text/plain"
   --skip-identical      Skip downloading files that are identical on both
                         sides.
+  --ignore-checksum     Turn off checksum validation for downloads.
   --no-shuffle          By default, when downloading a complete account or
                         container, download order is randomised in order to
-                        to reduce the load on individual drives when multiple
+                        reduce the load on individual drives when multiple
                         clients are executed simultaneously to download the
                         same set of objects (e.g. a nightly automated download
                         script to multiple servers). Enable this option to
@@ -247,52 +265,55 @@ Optional arguments:
 
 
 def st_download(parser, args, output_manager):
-    parser.add_option(
+    parser.add_argument(
         '-a', '--all', action='store_true', dest='yes_all',
         default=False, help='Indicates that you really want to download '
         'everything in the account.')
-    parser.add_option(
+    parser.add_argument(
         '-m', '--marker', dest='marker',
         default='', help='Marker to use when starting a container or '
         'account download.')
-    parser.add_option(
+    parser.add_argument(
         '-p', '--prefix', dest='prefix',
         help='Only download items beginning with the <prefix>.')
-    parser.add_option(
+    parser.add_argument(
         '-o', '--output', dest='out_file', help='For a single '
         'download, stream the output to <out_file>. '
         'Specifying "-" as <out_file> will redirect to stdout.')
-    parser.add_option(
+    parser.add_argument(
         '-D', '--output-dir', dest='out_directory',
         help='An optional directory to which to store objects. '
         'By default, all objects are recreated in the current directory.')
-    parser.add_option(
+    parser.add_argument(
         '-r', '--remove-prefix', action='store_true', dest='remove_prefix',
         default=False, help='An optional flag for --prefix <prefix>, '
         'use this option to download items without <prefix>.')
-    parser.add_option(
-        '', '--object-threads', type=int,
+    parser.add_argument(
+        '--object-threads', type=int,
         default=10, help='Number of threads to use for downloading objects. '
-        'Default is 10.')
-    parser.add_option(
-        '', '--container-threads', type=int, default=10,
+        'Its value must be a positive integer. Default is 10.')
+    parser.add_argument(
+        '--container-threads', type=int, default=10,
         help='Number of threads to use for downloading containers. '
-        'Default is 10.')
-    parser.add_option(
-        '', '--no-download', action='store_true',
+        'Its value must be a positive integer. Default is 10.')
+    parser.add_argument(
+        '--no-download', action='store_true',
         default=False,
         help="Perform download(s), but don't actually write anything to disk.")
-    parser.add_option(
+    parser.add_argument(
         '-H', '--header', action='append', dest='header',
         default=[],
         help='Adds a customized request header to the query, like "Range" or '
         '"If-Match". This option may be repeated. '
         'Example: --header "content-type:text/plain"')
-    parser.add_option(
+    parser.add_argument(
         '--skip-identical', action='store_true', dest='skip_identical',
         default=False, help='Skip downloading files that are identical on '
         'both sides.')
-    parser.add_option(
+    parser.add_argument(
+        '--ignore-checksum', action='store_false', dest='checksum',
+        default=True, help='Turn off checksum validation for downloads.')
+    parser.add_argument(
         '--no-shuffle', action='store_false', dest='shuffle',
         default=True, help='By default, download order is randomised in order '
         'to reduce the load on individual drives when multiple clients are '
@@ -302,26 +323,39 @@ def st_download(parser, args, output_manager):
         'are listed in the object store.')
     (options, args) = parse_args(parser, args)
     args = args[1:]
-    if options.out_file == '-':
-        options.verbose = 0
+    if options['out_file'] == '-':
+        options['verbose'] = 0
 
-    if options.out_file and len(args) != 2:
+    if options['out_file'] and len(args) != 2:
         exit('-o option only allowed for single file downloads')
 
-    if not options.prefix:
-        options.remove_prefix = False
+    if not options['prefix']:
+        options['remove_prefix'] = False
 
-    if options.out_directory and len(args) == 2:
+    if options['out_directory'] and len(args) == 2:
         exit('Please use -o option for single file downloads and renames')
 
-    if (not args and not options.yes_all) or (args and options.yes_all):
+    if (not args and not options['yes_all']) or (args and options['yes_all']):
         output_manager.error('Usage: %s download %s\n%s', BASENAME,
                              st_download_options, st_download_help)
         return
 
-    _opts = vars(options)
-    _opts['object_dd_threads'] = options.object_threads
-    with SwiftService(options=_opts) as swift:
+    if options['object_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --object-threads should be a positive integer.\n\n'
+            'Usage: %s download %s\n%s', BASENAME,
+            st_download_options, st_download_help)
+        return
+
+    if options['container_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --container-threads should be a positive integer.'
+            '\n\nUsage: %s download %s\n%s', BASENAME,
+            st_download_options, st_download_help)
+        return
+
+    options['object_dd_threads'] = options['object_threads']
+    with SwiftService(options=options) as swift:
         try:
             if not args:
                 down_iter = swift.download()
@@ -341,13 +375,13 @@ def st_download(parser, args, output_manager):
                     down_iter = swift.download(container, objects)
 
             for down in down_iter:
-                if options.out_file == '-' and 'contents' in down:
+                if options['out_file'] == '-' and 'contents' in down:
                     contents = down['contents']
                     for chunk in contents:
                         output_manager.print_raw(chunk)
                 else:
                     if down['success']:
-                        if options.verbose:
+                        if options['verbose']:
                             start_time = down['start_time']
                             headers_receipt = \
                                 down['headers_receipt'] - start_time
@@ -392,7 +426,7 @@ def st_download(parser, args, output_manager):
                         obj = down['object']
                         if isinstance(error, ClientException):
                             if error.http_status == 304 and \
-                                    options.skip_identical:
+                                    options['skip_identical']:
                                 output_manager.print_msg(
                                     "Skipped identical file '%s'", path)
                                 continue
@@ -436,17 +470,17 @@ Optional arguments:
 
 def st_list(parser, args, output_manager):
 
-    def _print_stats(options, stats):
+    def _print_stats(options, stats, human):
         total_count = total_bytes = 0
         container = stats.get("container", None)
         for item in stats["listing"]:
             item_name = item.get('name')
-            if not options.long and not options.human:
+            if not options['long'] and not human:
                 output_manager.print_msg(item.get('name', item.get('subdir')))
             else:
                 if not container:    # listing containers
                     item_bytes = item.get('bytes')
-                    byte_str = prt_bytes(item_bytes, options.human)
+                    byte_str = prt_bytes(item_bytes, human)
                     count = item.get('count')
                     total_count += count
                     try:
@@ -455,7 +489,7 @@ def st_list(parser, args, output_manager):
                         datestamp = strftime('%Y-%m-%d %H:%M:%S', utc)
                     except TypeError:
                         datestamp = '????-??-?? ??:??:??'
-                    if not options.totals:
+                    if not options['totals']:
                         output_manager.print_msg(
                             "%5s %s %s %s", count, byte_str,
                             datestamp, item_name)
@@ -464,65 +498,64 @@ def st_list(parser, args, output_manager):
                     content_type = item.get('content_type')
                     if subdir is None:
                         item_bytes = item.get('bytes')
-                        byte_str = prt_bytes(item_bytes, options.human)
+                        byte_str = prt_bytes(item_bytes, human)
                         date, xtime = item.get('last_modified').split('T')
                         xtime = xtime.split('.')[0]
                     else:
                         item_bytes = 0
-                        byte_str = prt_bytes(item_bytes, options.human)
+                        byte_str = prt_bytes(item_bytes, human)
                         date = xtime = ''
                         item_name = subdir
-                    if not options.totals:
+                    if not options['totals']:
                         output_manager.print_msg(
                             "%s %10s %8s %24s %s",
                             byte_str, date, xtime, content_type, item_name)
                 total_bytes += item_bytes
 
         # report totals
-        if options.long or options.human:
+        if options['long'] or human:
             if not container:
                 output_manager.print_msg(
                     "%5s %s", prt_bytes(total_count, True),
-                    prt_bytes(total_bytes, options.human))
+                    prt_bytes(total_bytes, human))
             else:
                 output_manager.print_msg(
-                    prt_bytes(total_bytes, options.human))
+                    prt_bytes(total_bytes, human))
 
-    parser.add_option(
+    parser.add_argument(
         '-l', '--long', dest='long', action='store_true', default=False,
         help='Long listing format, similar to ls -l.')
-    parser.add_option(
+    parser.add_argument(
         '--lh', dest='human', action='store_true',
         default=False, help='Report sizes in human readable format, '
         "similar to ls -lh.")
-    parser.add_option(
+    parser.add_argument(
         '-t', '--totals', dest='totals',
         help='used with -l or --lh, only report totals.',
         action='store_true', default=False)
-    parser.add_option(
+    parser.add_argument(
         '-p', '--prefix', dest='prefix',
         help='Only list items beginning with the prefix.')
-    parser.add_option(
+    parser.add_argument(
         '-d', '--delimiter', dest='delimiter',
         help='Roll up items with the given delimiter. For containers '
              'only. See OpenStack Swift API documentation for '
              'what this means.')
-    (options, args) = parse_args(parser, args)
+    options, args = parse_args(parser, args)
     args = args[1:]
-    if options.delimiter and not args:
+    if options['delimiter'] and not args:
         exit('-d option only allowed for container listings')
 
-    _opts = vars(options).copy()
-    if _opts['human']:
-        _opts.pop('human')
-        _opts['long'] = True
+    human = options.pop('human')
+    if human:
+        options['long'] = True
 
-    if options.totals and not options.long and not options.human:
+    if options['totals'] and not options['long']:
         output_manager.error(
             "Listing totals only works with -l or --lh.")
         return
 
-    with SwiftService(options=_opts) as swift:
+    with SwiftService(options=options) as swift:
         try:
             if not args:
                 stats_parts_gen = swift.list()
@@ -539,7 +572,7 @@ def st_list(parser, args, output_manager):
 
             for stats in stats_parts_gen:
                 if stats["success"]:
-                    _print_stats(options, stats)
+                    _print_stats(options, stats, human)
                 else:
                     raise stats["error"]
 
@@ -565,15 +598,13 @@ Optional arguments:
 
 
 def st_stat(parser, args, output_manager):
-    parser.add_option(
+    parser.add_argument(
         '--lh', dest='human', action='store_true', default=False,
         help='Report sizes in human readable format similar to ls -lh.')
-    (options, args) = parse_args(parser, args)
+    options, args = parse_args(parser, args)
     args = args[1:]
 
-    _opts = vars(options)
-
-    with SwiftService(options=_opts) as swift:
+    with SwiftService(options=options) as swift:
         try:
             if not args:
                 stat_result = swift.stat()
@@ -656,25 +687,25 @@ Optional arguments:
 
 
 def st_post(parser, args, output_manager):
-    parser.add_option(
+    parser.add_argument(
         '-r', '--read-acl', dest='read_acl', help='Read ACL for containers. '
         'Quick summary of ACL syntax: .r:*, .r:-.example.com, '
         '.r:www.example.com, account1, account2:user2')
-    parser.add_option(
+    parser.add_argument(
         '-w', '--write-acl', dest='write_acl', help='Write ACL for '
         'containers. Quick summary of ACL syntax: account1, '
         'account2:user2')
-    parser.add_option(
+    parser.add_argument(
         '-t', '--sync-to', dest='sync_to', help='Sets the '
         'Sync To for containers, for multi-cluster replication.')
-    parser.add_option(
+    parser.add_argument(
         '-k', '--sync-key', dest='sync_key', help='Sets the '
         'Sync Key for containers, for multi-cluster replication.')
-    parser.add_option(
+    parser.add_argument(
         '-m', '--meta', action='append', dest='meta', default=[],
         help='Sets a meta data item. This option may be repeated. '
         'Example: -m Color:Blue -m Size:Large')
-    parser.add_option(
+    parser.add_argument(
         '-H', '--header', action='append', dest='header',
         default=[], help='Adds a customized request header. '
         'This option may be repeated. '
@@ -682,13 +713,11 @@ def st_post(parser, args, output_manager):
         '-H "Content-Length: 4000"')
     (options, args) = parse_args(parser, args)
     args = args[1:]
-    if (options.read_acl or options.write_acl or options.sync_to or
-            options.sync_key) and not args:
+    if (options['read_acl'] or options['write_acl'] or options['sync_to'] or
+            options['sync_key']) and not args:
         exit('-r, -w, -t, and -k options only allowed for containers')
 
-    _opts = vars(options)
-
-    with SwiftService(options=_opts) as swift:
+    with SwiftService(options=options) as swift:
         try:
             if not args:
                 result = swift.post()
@@ -717,6 +746,105 @@ def st_post(parser, args, output_manager):
                     result = swift.post(container=container)
             if not result["success"]:
                 raise(result["error"])
+
+        except SwiftError as e:
+            output_manager.error(e.value)
+
+
+st_copy_options = '''[--destination </container/object>] [--fresh-metadata]
+                  [--meta <name:value>] [--header <header>] container object
+'''
+
+st_copy_help = '''
+Copies object to new destination, optionally updates objects metadata.
+If destination is not set, will update metadata of object
+
+Positional arguments:
+  container             Name of container to copy from.
+  object                Name of object to copy. Specify multiple times
+                        for multiple objects
+
+Optional arguments:
+  -d, --destination </container[/object]>
+                        The container and name of the destination object. Name
+                        of destination object can be ommited, then will be
+                        same as name of source object. Supplying multiple
+                        objects and destination with object name is invalid.
+  -M, --fresh-metadata  Copy the object without any existing metadata,
+                        If not set, metadata will be preserved or appended
+  -m, --meta <name:value>
+                        Sets a meta data item. This option may be repeated.
+                        Example: -m Color:Blue -m Size:Large
+  -H, --header <header:value>
+                        Adds a customized request header.
+                        This option may be repeated. Example
+                        -H "content-type:text/plain" -H "Content-Length: 4000"
+'''.strip('\n')
+
+
+def st_copy(parser, args, output_manager):
+    parser.add_argument(
+        '-d', '--destination', help='The container and name of the '
+        'destination object')
+    parser.add_argument(
+        '-M', '--fresh-metadata', action='store_true',
+        help='Copy the object without any existing metadata', default=False)
+    parser.add_argument(
+        '-m', '--meta', action='append', dest='meta', default=[],
+        help='Sets a meta data item. This option may be repeated. '
+        'Example: -m Color:Blue -m Size:Large')
+    parser.add_argument(
+        '-H', '--header', action='append', dest='header',
+        default=[], help='Adds a customized request header. '
+        'This option may be repeated. '
+        'Example: -H "content-type:text/plain" '
+        '-H "Content-Length: 4000"')
+    (options, args) = parse_args(parser, args)
+    args = args[1:]
+
+    with SwiftService(options=options) as swift:
+        try:
+            if len(args) >= 2:
+                container = args[0]
+                if '/' in container:
+                    output_manager.error(
+                        'WARNING: / in container name; you might have '
+                        "meant '%s' instead of '%s'." %
+                        (args[0].replace('/', ' ', 1), args[0]))
+                    return
+                objects = [arg for arg in args[1:]]
+
+                for r in swift.copy(
+                        container=container, objects=objects,
+                        options=options):
+                    if r['success']:
+                        if options['verbose']:
+                            if r['action'] == 'copy_object':
+                                output_manager.print_msg(
+                                    '%s/%s copied to %s' % (
+                                        r['container'],
+                                        r['object'],
+                                        r['destination'] or '<self>'))
+                            if r['action'] == 'create_container':
+                                output_manager.print_msg(
+                                    'created container %s' % r['container']
+                                )
+                    else:
+                        error = r['error']
+                        if 'action' in r and r['action'] == 'create_container':
+                            # it is not an error to be unable to create the
+                            # container so print a warning and carry on
+                            output_manager.warning(
+                                'Warning: failed to create container '
+                                "'%s': %s", container, error
+                            )
+                        else:
+                            output_manager.error("%s" % error)
+            else:
+                output_manager.error(
+                    'Usage: %s copy %s\n%s', BASENAME,
+                    st_copy_options, st_copy_help)
+                return
 
         except SwiftError as e:
             output_manager.error(e.value)
@@ -761,7 +889,7 @@ Optional arguments:
                         Default is 10.
   -H, --header <header:value>
                         Adds a customized request header. This option may be
-                        repeated. Example -H "content-type:text/plain"
+                        repeated. Example: -H "content-type:text/plain"
                          -H "Content-Length: 4000".
   --use-slo             When used in conjunction with --segment-size it will
                         create a Static Large Object instead of the default
@@ -775,58 +903,58 @@ Optional arguments:
 
 
 def st_upload(parser, args, output_manager):
-    parser.add_option(
+    parser.add_argument(
         '-c', '--changed', action='store_true', dest='changed',
         default=False, help='Only upload files that have changed since '
         'the last upload.')
-    parser.add_option(
+    parser.add_argument(
         '--skip-identical', action='store_true', dest='skip_identical',
         default=False, help='Skip uploading files that are identical on '
         'both sides.')
-    parser.add_option(
+    parser.add_argument(
         '-S', '--segment-size', dest='segment_size', help='Upload files '
         'in segments no larger than <size> (in Bytes) and then create a '
         '"manifest" file that will download all the segments as if it were '
         'the original file. Sizes may also be expressed as bytes with the '
         'B suffix, kilobytes with the K suffix, megabytes with the M suffix '
         'or gigabytes with the G suffix.')
-    parser.add_option(
+    parser.add_argument(
         '-C', '--segment-container', dest='segment_container',
         help='Upload the segments into the specified container. '
         'If not specified, the segments will be uploaded to a '
         '<container>_segments container to not pollute the main '
         '<container> listings.')
-    parser.add_option(
-        '', '--leave-segments', action='store_true',
+    parser.add_argument(
+        '--leave-segments', action='store_true',
         dest='leave_segments', default=False, help='Indicates that you want '
         'the older segments of manifest objects left alone (in the case of '
         'overwrites).')
-    parser.add_option(
-        '', '--object-threads', type=int, default=10,
+    parser.add_argument(
+        '--object-threads', type=int, default=10,
         help='Number of threads to use for uploading full objects. '
-        'Default is 10.')
-    parser.add_option(
-        '', '--segment-threads', type=int, default=10,
+        'Its value must be a positive integer. Default is 10.')
+    parser.add_argument(
+        '--segment-threads', type=int, default=10,
         help='Number of threads to use for uploading object segments. '
-        'Default is 10.')
-    parser.add_option(
+        'Its value must be a positive integer. Default is 10.')
+    parser.add_argument(
         '-H', '--header', action='append', dest='header',
         default=[], help='Set request headers with the syntax header:value. '
-        ' This option may be repeated. Example -H "content-type:text/plain" '
+        ' This option may be repeated. Example: -H "content-type:text/plain" '
         '-H "Content-Length: 4000"')
-    parser.add_option(
-        '', '--use-slo', action='store_true', default=False,
+    parser.add_argument(
+        '--use-slo', action='store_true', default=False,
         help='When used in conjunction with --segment-size, it will '
         'create a Static Large Object instead of the default '
         'Dynamic Large Object.')
-    parser.add_option(
-        '', '--object-name', dest='object_name',
+    parser.add_argument(
+        '--object-name', dest='object_name',
         help='Upload file and name object to <object-name> or upload dir and '
         'use <object-name> as object prefix instead of folder name.')
-    parser.add_option(
-        '', '--ignore-checksum', dest='checksum', default=True,
+    parser.add_argument(
+        '--ignore-checksum', dest='checksum', default=True,
         action='store_false', help='Turn off checksum validation for uploads.')
-    (options, args) = parse_args(parser, args)
+    options, args = parse_args(parser, args)
     args = args[1:]
     if len(args) < 2:
         output_manager.error(
@@ -837,33 +965,46 @@ def st_upload(parser, args, output_manager):
         container = args[0]
         files = args[1:]
 
-    if options.object_name is not None:
+    if options['object_name'] is not None:
         if len(files) > 1:
             output_manager.error('object-name only be used with 1 file or dir')
             return
         else:
             orig_path = files[0]
 
-    if options.segment_size:
+    if options['segment_size']:
         try:
             # If segment size only has digits assume it is bytes
-            int(options.segment_size)
+            int(options['segment_size'])
         except ValueError:
             try:
-                size_mod = "BKMG".index(options.segment_size[-1].upper())
-                multiplier = int(options.segment_size[:-1])
+                size_mod = "BKMG".index(options['segment_size'][-1].upper())
+                multiplier = int(options['segment_size'][:-1])
             except ValueError:
                 output_manager.error("Invalid segment size")
                 return
 
-            options.segment_size = str((1024 ** size_mod) * multiplier)
-        if int(options.segment_size) <= 0:
+            options['segment_size'] = str((1024 ** size_mod) * multiplier)
+        if int(options['segment_size']) <= 0:
             output_manager.error("segment-size should be positive")
             return
 
-    _opts = vars(options)
-    _opts['object_uu_threads'] = options.object_threads
-    with SwiftService(options=_opts) as swift:
+    if options['object_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --object-threads should be a positive integer.'
+            '\n\nUsage: %s upload %s\n%s', BASENAME, st_upload_options,
+            st_upload_help)
+        return
+
+    if options['segment_threads'] <= 0:
+        output_manager.error(
+            'ERROR: option --segment-threads should be a positive integer.'
+            '\n\nUsage: %s upload %s\n%s', BASENAME, st_upload_options,
+            st_upload_help)
+        return
+
+    options['object_uu_threads'] = options['object_threads']
+    with SwiftService(options=options) as swift:
         try:
             objs = []
             dir_markers = []
@@ -881,25 +1022,25 @@ def st_upload(parser, args, output_manager):
 
             # Now that we've collected all the required files and dir markers
             # build the tuples for the call to upload
-            if options.object_name is not None:
+            if options['object_name'] is not None:
                 objs = [
                     SwiftUploadObject(
                         o, object_name=o.replace(
-                            orig_path, options.object_name, 1
+                            orig_path, options['object_name'], 1
                         )
                     ) for o in objs
                 ]
                 dir_markers = [
                     SwiftUploadObject(
                         None, object_name=d.replace(
-                            orig_path, options.object_name, 1
+                            orig_path, options['object_name'], 1
                         ), options={'dir_marker': True}
                     ) for d in dir_markers
                 ]
 
             for r in swift.upload(container, objs + dir_markers):
                 if r['success']:
-                    if options.verbose:
+                    if options['verbose']:
                         if 'attempts' in r and r['attempts'] > 1:
                             if 'object' in r:
                                 output_manager.print_msg(
@@ -945,7 +1086,7 @@ def st_upload(parser, args, output_manager):
                         output_manager.error("%s" % error)
                         too_large = (isinstance(error, ClientException) and
                                      error.http_status == 413)
-                        if too_large and options.verbose > 0:
+                        if too_large and options['verbose'] > 0:
                             output_manager.error(
                                 "Consider using the --segment-size option "
                                 "to chunk the object")
@@ -954,13 +1095,16 @@ def st_upload(parser, args, output_manager):
             output_manager.error(e.value)
 
 
-st_capabilities_options = "[<proxy_url>]"
+st_capabilities_options = "[--json] [<proxy_url>]"
 st_info_options = st_capabilities_options
 st_capabilities_help = '''
 Retrieve capability of the proxy.
 
 Optional positional arguments:
   <proxy_url>           Proxy URL of the cluster to retrieve capabilities.
+
+Optional arguments:
+  --json                Print the cluster capabilities in JSON format.
 '''.strip('\n')
 st_info_help = st_capabilities_help
 
@@ -976,6 +1120,8 @@ def st_capabilities(parser, args, output_manager):
                                          key=lambda x: x[0]):
                     output_manager.print_msg("  %s: %s" % (key, value))
 
+    parser.add_argument('--json', action='store_true',
+                        help='print capability information in json')
     (options, args) = parse_args(parser, args)
     if args and len(args) > 2:
         output_manager.error('Usage: %s capabilities %s\n%s',
@@ -983,8 +1129,7 @@ def st_capabilities(parser, args, output_manager):
                              st_capabilities_options, st_capabilities_help)
         return
 
-    _opts = vars(options)
-    with SwiftService(options=_opts) as swift:
+    with SwiftService(options=options) as swift:
         try:
             if len(args) == 2:
                 url = args[1]
@@ -994,9 +1139,14 @@ def st_capabilities(parser, args, output_manager):
                 capabilities_result = swift.capabilities()
                 capabilities = capabilities_result['capabilities']
 
-            _print_compo_cap('Core', {'swift': capabilities['swift']})
-            del capabilities['swift']
-            _print_compo_cap('Additional middleware', capabilities)
+            if options['json']:
+                output_manager.print_msg(
+                    json.dumps(capabilities, sort_keys=True, indent=2))
+            else:
+                capabilities = dict(capabilities)
+                _print_compo_cap('Core', {'swift': capabilities['swift']})
+                del capabilities['swift']
+                _print_compo_cap('Additional middleware', capabilities)
         except SwiftError as e:
             output_manager.error(e.value)
 
@@ -1022,23 +1172,23 @@ Display auth related authentication variables in shell friendly format.
 
 def st_auth(parser, args, thread_manager):
     (options, args) = parse_args(parser, args)
-    _opts = vars(options)
-    if options.verbose > 1:
-        if options.auth_version in ('1', '1.0'):
-            print('export ST_AUTH=%s' % sh_quote(options.auth))
-            print('export ST_USER=%s' % sh_quote(options.user))
-            print('export ST_KEY=%s' % sh_quote(options.key))
+    if options['verbose'] > 1:
+        if options['auth_version'] in ('1', '1.0'):
+            print('export ST_AUTH=%s' % sh_quote(options['auth']))
+            print('export ST_USER=%s' % sh_quote(options['user']))
+            print('export ST_KEY=%s' % sh_quote(options['key']))
         else:
             print('export OS_IDENTITY_API_VERSION=%s' % sh_quote(
-                options.auth_version))
-            print('export OS_AUTH_VERSION=%s' % sh_quote(options.auth_version))
-            print('export OS_AUTH_URL=%s' % sh_quote(options.auth))
-            for k, v in sorted(_opts.items()):
+                options['auth_version']))
+            print('export OS_AUTH_VERSION=%s' % sh_quote(
+                options['auth_version']))
+            print('export OS_AUTH_URL=%s' % sh_quote(options['auth']))
+            for k, v in sorted(options.items()):
                 if v and k.startswith('os_') and \
                         k not in ('os_auth_url', 'os_options'):
                     print('export %s=%s' % (k.upper(), sh_quote(v)))
     else:
-        conn = get_conn(_opts)
+        conn = get_conn(options)
         url, token = conn.get_auth()
         print('export OS_STORAGE_URL=%s' % sh_quote(url))
         print('export OS_AUTH_TOKEN=%s' % sh_quote(token))
@@ -1071,7 +1221,7 @@ Optional arguments:
 
 
 def st_tempurl(parser, args, thread_manager):
-    parser.add_option(
+    parser.add_argument(
         '--absolute', action='store_true',
         dest='absolute_expiry', default=False,
         help=("If present, seconds argument will be interpreted as a Unix "
@@ -1095,89 +1245,88 @@ def st_tempurl(parser, args, thread_manager):
                                  'tempurl specified, possibly an error' %
                                  method.upper())
     url = generate_temp_url(path, seconds, key, method,
-                            absolute=options.absolute_expiry)
+                            absolute=options['absolute_expiry'])
     thread_manager.print_msg(url)
 
 
+class HelpFormatter(argparse.HelpFormatter):
+    def _format_action_invocation(self, action):
+        if not action.option_strings:
+            default = self._get_default_metavar_for_positional(action)
+            metavar, = self._metavar_formatter(action, default)(1)
+            return metavar
+
+        else:
+            parts = []
+
+            # if the Optional doesn't take a value, format is:
+            #    -s, --long
+            if action.nargs == 0:
+                parts.extend(action.option_strings)
+
+            # if the Optional takes a value, format is:
+            #    -s=ARGS, --long=ARGS
+            else:
+                default = self._get_default_metavar_for_optional(action)
+                args_string = self._format_args(action, default)
+                for option_string in action.option_strings:
+                    parts.append('%s=%s' % (option_string, args_string))
+
+            return ', '.join(parts)
+
+    # Back-port py3 methods
+    def _get_default_metavar_for_optional(self, action):
+        return action.dest.upper()
+
+    def _get_default_metavar_for_positional(self, action):
+        return action.dest
+
+
 def parse_args(parser, args, enforce_requires=True):
-    if not args:
-        args = ['-h']
-    (options, args) = parser.parse_args(args)
-    if enforce_requires and (options.debug or options.info):
+    options, args = parser.parse_known_args(args or ['-h'])
+    options = vars(options)
+    if enforce_requires and (options['debug'] or options['info']):
         logging.getLogger("swiftclient")
-        if options.debug:
+        if options['debug']:
             logging.basicConfig(level=logging.DEBUG)
             logging.getLogger('iso8601').setLevel(logging.WARNING)
             client_logger_settings['redact_sensitive_headers'] = False
-        elif options.info:
+        elif options['info']:
             logging.basicConfig(level=logging.INFO)
 
-    if len(args) > 1 and args[1] == '--help':
+    if args and options['help']:
         _help = globals().get('st_%s_help' % args[0],
                               "no help for %s" % args[0])
         print(_help)
         exit()
 
     # Short circuit for tempurl, which doesn't need auth
-    if len(args) > 0 and args[0] == 'tempurl':
+    if args and args[0] == 'tempurl':
         return options, args
 
-    if options.auth_version == '3.0':
-        # tolerate sloppy auth_version
-        options.auth_version = '3'
-
-    if (not (options.auth and options.user and options.key)
-            and options.auth_version != '3'):
-        # Use keystone auth if any of the old-style args are missing
-        options.auth_version = '2.0'
-
-    # Use new-style args if old ones not present
-    if not options.auth and options.os_auth_url:
-        options.auth = options.os_auth_url
-    if not options.user and options.os_username:
-        options.user = options.os_username
-    if not options.key and options.os_password:
-        options.key = options.os_password
-
-    # Specific OpenStack options
-    options.os_options = {
-        'user_id': options.os_user_id,
-        'user_domain_id': options.os_user_domain_id,
-        'user_domain_name': options.os_user_domain_name,
-        'tenant_id': options.os_tenant_id,
-        'tenant_name': options.os_tenant_name,
-        'project_id': options.os_project_id,
-        'project_name': options.os_project_name,
-        'project_domain_id': options.os_project_domain_id,
-        'project_domain_name': options.os_project_domain_name,
-        'service_type': options.os_service_type,
-        'endpoint_type': options.os_endpoint_type,
-        'auth_token': options.os_auth_token,
-        'object_storage_url': options.os_storage_url,
-        'region_name': options.os_region_name,
-    }
+    # Massage auth version; build out os_options subdict
+    process_options(options)
 
     if len(args) > 1 and args[0] == "capabilities":
         return options, args
 
-    if (options.os_options.get('object_storage_url') and
-            options.os_options.get('auth_token') and
-            (options.auth_version == '2.0' or options.auth_version == '3')):
+    if (options['os_options']['object_storage_url'] and
+            options['os_options']['auth_token']):
         return options, args
 
     if enforce_requires:
-        if options.auth_version == '3':
-            if not options.auth:
+        if options['auth_version'] == '3':
+            if not options['auth']:
                 exit('Auth version 3 requires OS_AUTH_URL to be set or ' +
                      'overridden with --os-auth-url')
-            if not (options.user or options.os_user_id):
+            if not (options['user'] or options['os_user_id']):
                 exit('Auth version 3 requires either OS_USERNAME or ' +
                      'OS_USER_ID to be set or overridden with ' +
                      '--os-username or --os-user-id respectively.')
-            if not options.key:
+            if not options['key']:
                 exit('Auth version 3 requires OS_PASSWORD to be set or ' +
                      'overridden with --os-password')
-        elif not (options.auth and options.user and options.key):
+        elif not (options['auth'] and options['user'] and options['key']):
             exit('''
 Auth version 1.0 requires ST_AUTH, ST_USER, and ST_KEY environment variables
 to be set or overridden with -A, -U, or -K.
@@ -1190,17 +1339,14 @@ adding "-V 2" is necessary for this.'''.strip('\n'))
 
 
 def main(arguments=None):
-    if arguments:
-        argv = arguments
-    else:
-        argv = sys_argv
+    argv = sys_argv if arguments is None else arguments
 
     argv = [a if isinstance(a, text_type) else a.decode('utf-8') for a in argv]
 
     version = client_version
-    parser = OptionParser(version='python-swiftclient %s' % version,
-                          usage='''
-usage: %prog [--version] [--help] [--os-help] [--snet] [--verbose]
+    parser = argparse.ArgumentParser(
+        add_help=False, formatter_class=HelpFormatter, usage='''
+%(prog)s [--version] [--help] [--os-help] [--snet] [--verbose]
              [--debug] [--info] [--quiet] [--auth <auth_url>]
              [--auth-version <auth_version> |
                  --os-identity-api-version <auth_version> ]
@@ -1221,6 +1367,8 @@ usage: %prog [--version] [--help] [--os-help] [--snet] [--verbose]
              [--os-service-type <service-type>]
              [--os-endpoint-type <endpoint-type>]
              [--os-cacert <ca-certificate>] [--insecure]
+             [--os-cert <client-certificate-file>]
+             [--os-key <client-certificate-key-file>]
              [--no-ssl-compression]
              <subcommand> [--help] [<subcommand options>]
 
@@ -1234,6 +1382,7 @@ Positional arguments:
                          for a container.
     post                 Updates meta information for the account, container,
                          or object; creates containers if not present.
+    copy                 Copies object, optionally adds meta
     stat                 Displays information for the account, container,
                          or object.
     upload               Uploads files or directories to the given container.
@@ -1242,29 +1391,34 @@ Positional arguments:
     auth                 Display auth related environment variables.
 
 Examples:
-  %prog download --help
+  %(prog)s download --help
 
-  %prog -A https://auth.api.rackspacecloud.com/v1.0 -U user -K api_key stat -v
+  %(prog)s -A https://auth.api.rackspacecloud.com/v1.0 \\
+      -U user -K api_key stat -v
 
-  %prog --os-auth-url https://api.example.com/v2.0 --os-tenant-name tenant \\
+  %(prog)s --os-auth-url https://api.example.com/v2.0 \\
+      --os-tenant-name tenant \\
       --os-username user --os-password password list
 
-  %prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
+  %(prog)s --os-auth-url https://api.example.com/v3 --auth-version 3\\
       --os-project-name project1 --os-project-domain-name domain1 \\
       --os-username user --os-user-domain-name domain1 \\
       --os-password password list
 
-  %prog --os-auth-url https://api.example.com/v3 --auth-version 3\\
+  %(prog)s --os-auth-url https://api.example.com/v3 --auth-version 3\\
       --os-project-id 0123456789abcdef0123456789abcdef \\
       --os-user-id abcdef0123456789abcdef0123456789 \\
       --os-password password list
 
-  %prog --os-auth-token 6ee5eb33efad4e45ab46806eac010566 \\
+  %(prog)s --os-auth-token 6ee5eb33efad4e45ab46806eac010566 \\
       --os-storage-url https://10.1.5.2:8080/v1/AUTH_ced809b6a4baea7aeab61a \\
       list
 
-  %prog list --lh
+  %(prog)s list --lh
 '''.strip('\n'))
+    parser.add_argument('--version', action='version',
+                        version='python-swiftclient %s' % version)
+    parser.add_argument('-h', '--help', action='store_true')
 
     default_auth_version = '1.0'
     for k in ('ST_AUTH_VERSION', 'OS_AUTH_VERSION', 'OS_IDENTITY_API_VERSION'):
@@ -1274,193 +1428,206 @@ Examples:
         except KeyError:
             pass
 
-    parser.add_option('--os-help', action='store_true', dest='os_help',
-                      help='Show OpenStack authentication options.')
-    parser.add_option('--os_help', action='store_true', help=SUPPRESS_HELP)
-    parser.add_option('-s', '--snet', action='store_true', dest='snet',
-                      default=False, help='Use SERVICENET internal network.')
-    parser.add_option('-v', '--verbose', action='count', dest='verbose',
-                      default=1, help='Print more info.')
-    parser.add_option('--debug', action='store_true', dest='debug',
-                      default=False, help='Show the curl commands and results '
-                      'of all http queries regardless of result status.')
-    parser.add_option('--info', action='store_true', dest='info',
-                      default=False, help='Show the curl commands and results '
-                      'of all http queries which return an error.')
-    parser.add_option('-q', '--quiet', action='store_const', dest='verbose',
-                      const=0, default=1, help='Suppress status output.')
-    parser.add_option('-A', '--auth', dest='auth',
-                      default=environ.get('ST_AUTH'),
-                      help='URL for obtaining an auth token.')
-    parser.add_option('-V', '--auth-version', '--os-identity-api-version',
-                      dest='auth_version',
-                      default=default_auth_version,
-                      type=str,
-                      help='Specify a version for authentication. '
-                           'Defaults to env[ST_AUTH_VERSION], '
-                           'env[OS_AUTH_VERSION], env[OS_IDENTITY_API_VERSION]'
-                           ' or 1.0.')
-    parser.add_option('-U', '--user', dest='user',
-                      default=environ.get('ST_USER'),
-                      help='User name for obtaining an auth token.')
-    parser.add_option('-K', '--key', dest='key',
-                      default=environ.get('ST_KEY'),
-                      help='Key for obtaining an auth token.')
-    parser.add_option('-R', '--retries', type=int, default=5, dest='retries',
-                      help='The number of times to retry a failed connection.')
+    parser.add_argument('--os-help', action='store_true', dest='os_help',
+                        help='Show OpenStack authentication options.')
+    parser.add_argument('--os_help', action='store_true',
+                        help=argparse.SUPPRESS)
+    parser.add_argument('-s', '--snet', action='store_true', dest='snet',
+                        default=False, help='Use SERVICENET internal network.')
+    parser.add_argument('-v', '--verbose', action='count', dest='verbose',
+                        default=1, help='Print more info.')
+    parser.add_argument('--debug', action='store_true', dest='debug',
+                        default=False, help='Show the curl commands and '
+                        'results of all http queries regardless of result '
+                        'status.')
+    parser.add_argument('--info', action='store_true', dest='info',
+                        default=False, help='Show the curl commands and '
+                        'results of all http queries which return an error.')
+    parser.add_argument('-q', '--quiet', action='store_const', dest='verbose',
+                        const=0, default=1, help='Suppress status output.')
+    parser.add_argument('-A', '--auth', dest='auth',
+                        default=environ.get('ST_AUTH'),
+                        help='URL for obtaining an auth token.')
+    parser.add_argument('-V', '--auth-version', '--os-identity-api-version',
+                        dest='auth_version',
+                        default=default_auth_version,
+                        type=str,
+                        help='Specify a version for authentication. '
+                             'Defaults to env[ST_AUTH_VERSION], '
+                             'env[OS_AUTH_VERSION], '
+                             'env[OS_IDENTITY_API_VERSION] or 1.0.')
+    parser.add_argument('-U', '--user', dest='user',
+                        default=environ.get('ST_USER'),
+                        help='User name for obtaining an auth token.')
+    parser.add_argument('-K', '--key', dest='key',
+                        default=environ.get('ST_KEY'),
+                        help='Key for obtaining an auth token.')
+    parser.add_argument('-R', '--retries', type=int, default=5, dest='retries',
+                        help='The number of times to retry a failed '
+                             'connection.')
     default_val = config_true_value(environ.get('SWIFTCLIENT_INSECURE'))
-    parser.add_option('--insecure',
-                      action="store_true", dest="insecure",
-                      default=default_val,
-                      help='Allow swiftclient to access servers without '
-                           'having to verify the SSL certificate. '
-                           'Defaults to env[SWIFTCLIENT_INSECURE] '
-                           '(set to \'true\' to enable).')
-    parser.add_option('--no-ssl-compression',
-                      action='store_false', dest='ssl_compression',
-                      default=True,
-                      help='This option is deprecated and not used anymore. '
-                           'SSL compression should be disabled by default '
-                           'by the system SSL library.')
+    parser.add_argument('--insecure',
+                        action="store_true", dest="insecure",
+                        default=default_val,
+                        help='Allow swiftclient to access servers without '
+                             'having to verify the SSL certificate. '
+                             'Defaults to env[SWIFTCLIENT_INSECURE] '
+                             '(set to \'true\' to enable).')
+    parser.add_argument('--no-ssl-compression',
+                        action='store_false', dest='ssl_compression',
+                        default=True,
+                        help='This option is deprecated and not used anymore. '
+                             'SSL compression should be disabled by default '
+                             'by the system SSL library.')
 
-    os_grp = OptionGroup(parser, "OpenStack authentication options")
-    os_grp.add_option('--os-username',
-                      metavar='<auth-user-name>',
-                      default=environ.get('OS_USERNAME'),
-                      help='OpenStack username. Defaults to env[OS_USERNAME].')
-    os_grp.add_option('--os_username',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-user-id',
-                      metavar='<auth-user-id>',
-                      default=environ.get('OS_USER_ID'),
-                      help='OpenStack user ID. '
-                      'Defaults to env[OS_USER_ID].')
-    os_grp.add_option('--os_user_id',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-user-domain-id',
-                      metavar='<auth-user-domain-id>',
-                      default=environ.get('OS_USER_DOMAIN_ID'),
-                      help='OpenStack user domain ID. '
-                      'Defaults to env[OS_USER_DOMAIN_ID].')
-    os_grp.add_option('--os_user_domain_id',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-user-domain-name',
-                      metavar='<auth-user-domain-name>',
-                      default=environ.get('OS_USER_DOMAIN_NAME'),
-                      help='OpenStack user domain name. '
-                           'Defaults to env[OS_USER_DOMAIN_NAME].')
-    os_grp.add_option('--os_user_domain_name',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-password',
-                      metavar='<auth-password>',
-                      default=environ.get('OS_PASSWORD'),
-                      help='OpenStack password. Defaults to env[OS_PASSWORD].')
-    os_grp.add_option('--os_password',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-tenant-id',
-                      metavar='<auth-tenant-id>',
-                      default=environ.get('OS_TENANT_ID'),
-                      help='OpenStack tenant ID. '
-                      'Defaults to env[OS_TENANT_ID].')
-    os_grp.add_option('--os_tenant_id',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-tenant-name',
-                      metavar='<auth-tenant-name>',
-                      default=environ.get('OS_TENANT_NAME'),
-                      help='OpenStack tenant name. '
-                           'Defaults to env[OS_TENANT_NAME].')
-    os_grp.add_option('--os_tenant_name',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-project-id',
-                      metavar='<auth-project-id>',
-                      default=environ.get('OS_PROJECT_ID'),
-                      help='OpenStack project ID. '
-                      'Defaults to env[OS_PROJECT_ID].')
-    os_grp.add_option('--os_project_id',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-project-name',
-                      metavar='<auth-project-name>',
-                      default=environ.get('OS_PROJECT_NAME'),
-                      help='OpenStack project name. '
-                           'Defaults to env[OS_PROJECT_NAME].')
-    os_grp.add_option('--os_project_name',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-project-domain-id',
-                      metavar='<auth-project-domain-id>',
-                      default=environ.get('OS_PROJECT_DOMAIN_ID'),
-                      help='OpenStack project domain ID. '
-                      'Defaults to env[OS_PROJECT_DOMAIN_ID].')
-    os_grp.add_option('--os_project_domain_id',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-project-domain-name',
-                      metavar='<auth-project-domain-name>',
-                      default=environ.get('OS_PROJECT_DOMAIN_NAME'),
-                      help='OpenStack project domain name. '
-                           'Defaults to env[OS_PROJECT_DOMAIN_NAME].')
-    os_grp.add_option('--os_project_domain_name',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-auth-url',
-                      metavar='<auth-url>',
-                      default=environ.get('OS_AUTH_URL'),
-                      help='OpenStack auth URL. Defaults to env[OS_AUTH_URL].')
-    os_grp.add_option('--os_auth_url',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-auth-token',
-                      metavar='<auth-token>',
-                      default=environ.get('OS_AUTH_TOKEN'),
-                      help='OpenStack token. Defaults to env[OS_AUTH_TOKEN]. '
-                           'Used with --os-storage-url to bypass the '
-                           'usual username/password authentication.')
-    os_grp.add_option('--os_auth_token',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-storage-url',
-                      metavar='<storage-url>',
-                      default=environ.get('OS_STORAGE_URL'),
-                      help='OpenStack storage URL. '
-                           'Defaults to env[OS_STORAGE_URL]. '
-                           'Overrides the storage url returned during auth. '
-                           'Will bypass authentication when used with '
-                           '--os-auth-token.')
-    os_grp.add_option('--os_storage_url',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-region-name',
-                      metavar='<region-name>',
-                      default=environ.get('OS_REGION_NAME'),
-                      help='OpenStack region name. '
-                           'Defaults to env[OS_REGION_NAME].')
-    os_grp.add_option('--os_region_name',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-service-type',
-                      metavar='<service-type>',
-                      default=environ.get('OS_SERVICE_TYPE'),
-                      help='OpenStack Service type. '
-                           'Defaults to env[OS_SERVICE_TYPE].')
-    os_grp.add_option('--os_service_type',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-endpoint-type',
-                      metavar='<endpoint-type>',
-                      default=environ.get('OS_ENDPOINT_TYPE'),
-                      help='OpenStack Endpoint type. '
-                           'Defaults to env[OS_ENDPOINT_TYPE].')
-    os_grp.add_option('--os_endpoint_type',
-                      help=SUPPRESS_HELP)
-    os_grp.add_option('--os-cacert',
-                      metavar='<ca-certificate>',
-                      default=environ.get('OS_CACERT'),
-                      help='Specify a CA bundle file to use in verifying a '
-                      'TLS (https) server certificate. '
-                      'Defaults to env[OS_CACERT].')
-    parser.disable_interspersed_args()
-    # call parse_args before adding os options group so that -h, --help will
-    # print a condensed help message without the os options
-    (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
-    parser.add_option_group(os_grp)
-    if options.os_help:
-        # if openstack option help has been explicitly requested then force
-        # help message, now that os_options group has been added to parser
-        argv = ['-h']
-    (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
-    parser.enable_interspersed_args()
+    os_grp = parser.add_argument_group("OpenStack authentication options")
+    os_grp.add_argument('--os-username',
+                        metavar='<auth-user-name>',
+                        default=environ.get('OS_USERNAME'),
+                        help='OpenStack username. Defaults to '
+                             'env[OS_USERNAME].')
+    os_grp.add_argument('--os_username',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-user-id',
+                        metavar='<auth-user-id>',
+                        default=environ.get('OS_USER_ID'),
+                        help='OpenStack user ID. '
+                        'Defaults to env[OS_USER_ID].')
+    os_grp.add_argument('--os_user_id',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-user-domain-id',
+                        metavar='<auth-user-domain-id>',
+                        default=environ.get('OS_USER_DOMAIN_ID'),
+                        help='OpenStack user domain ID. '
+                        'Defaults to env[OS_USER_DOMAIN_ID].')
+    os_grp.add_argument('--os_user_domain_id',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-user-domain-name',
+                        metavar='<auth-user-domain-name>',
+                        default=environ.get('OS_USER_DOMAIN_NAME'),
+                        help='OpenStack user domain name. '
+                             'Defaults to env[OS_USER_DOMAIN_NAME].')
+    os_grp.add_argument('--os_user_domain_name',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-password',
+                        metavar='<auth-password>',
+                        default=environ.get('OS_PASSWORD'),
+                        help='OpenStack password. Defaults to '
+                             'env[OS_PASSWORD].')
+    os_grp.add_argument('--os_password',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-tenant-id',
+                        metavar='<auth-tenant-id>',
+                        default=environ.get('OS_TENANT_ID'),
+                        help='OpenStack tenant ID. '
+                        'Defaults to env[OS_TENANT_ID].')
+    os_grp.add_argument('--os_tenant_id',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-tenant-name',
+                        metavar='<auth-tenant-name>',
+                        default=environ.get('OS_TENANT_NAME'),
+                        help='OpenStack tenant name. '
+                             'Defaults to env[OS_TENANT_NAME].')
+    os_grp.add_argument('--os_tenant_name',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-project-id',
+                        metavar='<auth-project-id>',
+                        default=environ.get('OS_PROJECT_ID'),
+                        help='OpenStack project ID. '
+                        'Defaults to env[OS_PROJECT_ID].')
+    os_grp.add_argument('--os_project_id',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-project-name',
+                        metavar='<auth-project-name>',
+                        default=environ.get('OS_PROJECT_NAME'),
+                        help='OpenStack project name. '
+                             'Defaults to env[OS_PROJECT_NAME].')
+    os_grp.add_argument('--os_project_name',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-project-domain-id',
+                        metavar='<auth-project-domain-id>',
+                        default=environ.get('OS_PROJECT_DOMAIN_ID'),
+                        help='OpenStack project domain ID. '
+                        'Defaults to env[OS_PROJECT_DOMAIN_ID].')
+    os_grp.add_argument('--os_project_domain_id',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-project-domain-name',
+                        metavar='<auth-project-domain-name>',
+                        default=environ.get('OS_PROJECT_DOMAIN_NAME'),
+                        help='OpenStack project domain name. '
+                             'Defaults to env[OS_PROJECT_DOMAIN_NAME].')
+    os_grp.add_argument('--os_project_domain_name',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-auth-url',
+                        metavar='<auth-url>',
+                        default=environ.get('OS_AUTH_URL'),
+                        help='OpenStack auth URL. Defaults to '
+                             'env[OS_AUTH_URL].')
+    os_grp.add_argument('--os_auth_url',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-auth-token',
+                        metavar='<auth-token>',
+                        default=environ.get('OS_AUTH_TOKEN'),
+                        help='OpenStack token. Defaults to '
+                             'env[OS_AUTH_TOKEN]. Used with --os-storage-url '
+                             'to bypass the usual username/password '
+                             'authentication.')
+    os_grp.add_argument('--os_auth_token',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-storage-url',
+                        metavar='<storage-url>',
+                        default=environ.get('OS_STORAGE_URL'),
+                        help='OpenStack storage URL. '
+                             'Defaults to env[OS_STORAGE_URL]. '
+                             'Overrides the storage url returned during auth. '
+                             'Will bypass authentication when used with '
+                             '--os-auth-token.')
+    os_grp.add_argument('--os_storage_url',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-region-name',
+                        metavar='<region-name>',
+                        default=environ.get('OS_REGION_NAME'),
+                        help='OpenStack region name. '
+                             'Defaults to env[OS_REGION_NAME].')
+    os_grp.add_argument('--os_region_name',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-service-type',
+                        metavar='<service-type>',
+                        default=environ.get('OS_SERVICE_TYPE'),
+                        help='OpenStack Service type. '
+                             'Defaults to env[OS_SERVICE_TYPE].')
+    os_grp.add_argument('--os_service_type',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-endpoint-type',
+                        metavar='<endpoint-type>',
+                        default=environ.get('OS_ENDPOINT_TYPE'),
+                        help='OpenStack Endpoint type. '
+                             'Defaults to env[OS_ENDPOINT_TYPE].')
+    os_grp.add_argument('--os_endpoint_type',
+                        help=argparse.SUPPRESS)
+    os_grp.add_argument('--os-cacert',
+                        metavar='<ca-certificate>',
+                        default=environ.get('OS_CACERT'),
+                        help='Specify a CA bundle file to use in verifying a '
+                        'TLS (https) server certificate. '
+                        'Defaults to env[OS_CACERT].')
+    os_grp.add_argument('--os-cert',
+                        metavar='<client-certificate-file>',
+                        default=environ.get('OS_CERT'),
+                        help='Specify a client certificate file (for client '
+                        'auth). Defaults to env[OS_CERT].')
+    os_grp.add_argument('--os-key',
+                        metavar='<client-certificate-key-file>',
+                        default=environ.get('OS_KEY'),
+                        help='Specify a client certificate key file (for '
+                        'client auth). Defaults to env[OS_KEY].')
+    options, args = parse_args(parser, argv[1:], enforce_requires=False)
+
+    if options['help'] or options['os_help']:
+        if options['help']:
+            parser._action_groups.pop()
+        parser.print_help()
+        exit()
 
     if not args or args[0] not in commands:
         parser.print_usage()
@@ -1471,11 +1638,21 @@ Examples:
     signal.signal(signal.SIGINT, immediate_exit)
 
     with OutputManager() as output:
-
         parser.usage = globals()['st_%s_help' % args[0]]
+        if options['insecure']:
+            import requests
+            from requests.packages.urllib3.exceptions import \
+                InsecureRequestWarning
+            requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
         try:
             globals()['st_%s' % args[0]](parser, argv[1:], output)
-        except (ClientException, RequestException, socket.error) as err:
+        except ClientException as err:
+            output.error(str(err))
+            trans_id = (err.http_response_headers or {}).get('X-Trans-Id')
+            if trans_id:
+                output.error("Failed Transaction ID: %s",
+                             parse_header_string(trans_id))
+        except (RequestException, socket.error) as err:
             output.error(str(err))
 
     if output.get_error_count() > 0:

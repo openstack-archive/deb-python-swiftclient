@@ -59,7 +59,7 @@ class TestSwiftPostObject(unittest.TestCase):
         spo = self.spo('obj_name')
 
         self.assertEqual(spo.object_name, 'obj_name')
-        self.assertEqual(spo.options, None)
+        self.assertIsNone(spo.options)
 
     def test_create_with_invalid_name(self):
         # empty strings are not allowed as names
@@ -67,6 +67,42 @@ class TestSwiftPostObject(unittest.TestCase):
 
         # names cannot be anything but strings
         self.assertRaises(SwiftError, self.spo, 1)
+
+
+class TestSwiftCopyObject(unittest.TestCase):
+
+    def setUp(self):
+        super(TestSwiftCopyObject, self).setUp()
+        self.sco = swiftclient.service.SwiftCopyObject
+
+    def test_create(self):
+        sco = self.sco('obj_name')
+
+        self.assertEqual(sco.object_name, 'obj_name')
+        self.assertIsNone(sco.destination)
+        self.assertFalse(sco.fresh_metadata)
+
+        sco = self.sco('obj_name',
+                       {'destination': '/dest', 'fresh_metadata': True})
+
+        self.assertEqual(sco.object_name, 'obj_name')
+        self.assertEqual(sco.destination, '/dest/obj_name')
+        self.assertTrue(sco.fresh_metadata)
+
+        sco = self.sco('obj_name',
+                       {'destination': '/dest/new_obj/a',
+                        'fresh_metadata': False})
+
+        self.assertEqual(sco.object_name, 'obj_name')
+        self.assertEqual(sco.destination, '/dest/new_obj/a')
+        self.assertFalse(sco.fresh_metadata)
+
+    def test_create_with_invalid_name(self):
+        # empty strings are not allowed as names
+        self.assertRaises(SwiftError, self.sco, '')
+
+        # names cannot be anything but strings
+        self.assertRaises(SwiftError, self.sco, 1)
 
 
 class TestSwiftReader(unittest.TestCase):
@@ -81,10 +117,10 @@ class TestSwiftReader(unittest.TestCase):
 
         self.assertEqual(sr._path, 'path')
         self.assertEqual(sr._body, 'body')
-        self.assertEqual(sr._content_length, None)
-        self.assertEqual(sr._expected_etag, None)
+        self.assertIsNone(sr._content_length)
+        self.assertIsNone(sr._expected_etag)
 
-        self.assertNotEqual(sr._actual_md5, None)
+        self.assertIsNotNone(sr._actual_md5)
         self.assertIs(type(sr._actual_md5), self.md5_type)
 
     def test_create_with_large_object_headers(self):
@@ -92,16 +128,25 @@ class TestSwiftReader(unittest.TestCase):
         sr = self.sr('path', 'body', {'x-object-manifest': 'test'})
         self.assertEqual(sr._path, 'path')
         self.assertEqual(sr._body, 'body')
-        self.assertEqual(sr._content_length, None)
-        self.assertEqual(sr._expected_etag, None)
-        self.assertEqual(sr._actual_md5, None)
+        self.assertIsNone(sr._content_length)
+        self.assertIsNone(sr._expected_etag)
+        self.assertIsNone(sr._actual_md5)
 
         sr = self.sr('path', 'body', {'x-static-large-object': 'test'})
         self.assertEqual(sr._path, 'path')
         self.assertEqual(sr._body, 'body')
-        self.assertEqual(sr._content_length, None)
-        self.assertEqual(sr._expected_etag, None)
-        self.assertEqual(sr._actual_md5, None)
+        self.assertIsNone(sr._content_length)
+        self.assertIsNone(sr._expected_etag)
+        self.assertIsNone(sr._actual_md5)
+
+    def test_create_with_ignore_checksum(self):
+        # md5 should not be initialized if checksum is False
+        sr = self.sr('path', 'body', {}, False)
+        self.assertEqual(sr._path, 'path')
+        self.assertEqual(sr._body, 'body')
+        self.assertIsNone(sr._content_length)
+        self.assertIsNone(sr._expected_etag)
+        self.assertIsNone(sr._actual_md5)
 
     def test_create_with_content_length(self):
         sr = self.sr('path', 'body', {'content-length': 5})
@@ -109,9 +154,9 @@ class TestSwiftReader(unittest.TestCase):
         self.assertEqual(sr._path, 'path')
         self.assertEqual(sr._body, 'body')
         self.assertEqual(sr._content_length, 5)
-        self.assertEqual(sr._expected_etag, None)
+        self.assertIsNone(sr._expected_etag)
 
-        self.assertNotEqual(sr._actual_md5, None)
+        self.assertIsNotNone(sr._actual_md5)
         self.assertIs(type(sr._actual_md5), self.md5_type)
 
         # Check Contentlength raises error if it isn't an integer
@@ -392,10 +437,10 @@ class TestSwiftError(unittest.TestCase):
         se = SwiftError(5)
 
         self.assertEqual(se.value, 5)
-        self.assertEqual(se.container, None)
-        self.assertEqual(se.obj, None)
-        self.assertEqual(se.segment, None)
-        self.assertEqual(se.exception, None)
+        self.assertIsNone(se.container)
+        self.assertIsNone(se.obj)
+        self.assertIsNone(se.segment)
+        self.assertIsNone(se.exception)
 
         self.assertEqual(str(se), '5')
 
@@ -487,7 +532,7 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(opt_c['key'], 'key')
 
     def test_split_headers(self):
-        mock_headers = ['color:blue', 'size:large']
+        mock_headers = ['color:blue', 'SIZE: large']
         expected = {'Color': 'blue', 'Size': 'large'}
 
         actual = swiftclient.service.split_headers(mock_headers)
@@ -517,12 +562,12 @@ class TestSwiftUploadObject(unittest.TestCase):
         suo = self.suo('source')
         self.assertEqual(suo.source, 'source')
         self.assertEqual(suo.object_name, 'source')
-        self.assertEqual(suo.options, None)
+        self.assertIsNone(suo.options)
 
         suo = self.suo('source', 'obj_name')
         self.assertEqual(suo.source, 'source')
         self.assertEqual(suo.object_name, 'obj_name')
-        self.assertEqual(suo.options, None)
+        self.assertIsNone(suo.options)
 
         suo = self.suo('source', 'obj_name', {'opt': '123'})
         self.assertEqual(suo.source, 'source')
@@ -541,7 +586,7 @@ class TestSwiftUploadObject(unittest.TestCase):
             suo = self.suo(mock_file, 'obj_name')
             self.assertEqual(suo.source, mock_file)
             self.assertEqual(suo.object_name, 'obj_name')
-            self.assertEqual(suo.options, None)
+            self.assertIsNone(suo.options)
 
             suo = self.suo(mock_file, 'obj_name', {'opt': '123'})
             self.assertEqual(suo.source, mock_file)
@@ -550,9 +595,9 @@ class TestSwiftUploadObject(unittest.TestCase):
 
     def test_create_with_no_source(self):
         suo = self.suo(None, 'obj_name')
-        self.assertEqual(suo.source, None)
+        self.assertIsNone(suo.source)
         self.assertEqual(suo.object_name, 'obj_name')
-        self.assertEqual(suo.options, None)
+        self.assertIsNone(suo.options)
 
         # Check error is raised if source is None without an object name
         self.assertRaises(SwiftError, self.suo, None)
@@ -685,6 +730,41 @@ class TestServiceList(_TestServiceBase):
             mock_conn, 'test_c', long_opts, mock_q
         )
         self.assertEqual(expected_r_long, self._get_queue(mock_q))
+        self.assertIsNone(self._get_queue(mock_q))
+
+    def test_list_container_marker(self):
+        mock_q = Queue()
+        mock_conn = self._get_mock_connection()
+
+        get_container_returns = [
+            (None, [{'name': 'b'}, {'name': 'c'}]),
+            (None, [])
+        ]
+        mock_get_cont = Mock(side_effect=get_container_returns)
+        mock_conn.get_container = mock_get_cont
+
+        expected_r = self._get_expected({
+            'action': 'list_container_part',
+            'container': 'test_c',
+            'success': True,
+            'listing': [{'name': 'b'}, {'name': 'c'}],
+            'marker': 'b'
+        })
+
+        _opts = self.opts.copy()
+        _opts['marker'] = 'b'
+        SwiftService._list_container_job(mock_conn, 'test_c', _opts, mock_q)
+
+        # This does not test if the marker is propagated, because we always
+        # get the final call to the get_container with the final item 'c',
+        # even if marker wasn't set. This test just makes sure the whole
+        # stack works in a sane way.
+        mock_kw = mock_get_cont.call_args[1]
+        self.assertEqual(mock_kw['marker'], 'c')
+
+        # This tests that the lower levels get the marker delivered.
+        self.assertEqual(expected_r, self._get_queue(mock_q))
+
         self.assertIsNone(self._get_queue(mock_q))
 
     def test_list_container_exception(self):
@@ -945,11 +1025,12 @@ class TestServiceUpload(_TestServiceBase):
             self.assertEqual(r, expected_r)
 
             self.assertEqual(mock_conn.put_object.call_count, 1)
-            mock_conn.put_object.assert_called_with('test_c_segments',
-                                                    'test_s_1',
-                                                    mock.ANY,
-                                                    content_length=10,
-                                                    response_dict={})
+            mock_conn.put_object.assert_called_with(
+                'test_c_segments', 'test_s_1',
+                mock.ANY,
+                content_length=10,
+                content_type='application/swiftclient-segment',
+                response_dict={})
             contents = mock_conn.put_object.call_args[0][2]
             self.assertIsInstance(contents, utils.LengthWrapper)
             self.assertEqual(len(contents), 10)
@@ -988,11 +1069,12 @@ class TestServiceUpload(_TestServiceBase):
 
             self.assertIsNone(r.get('error'))
             self.assertEqual(mock_conn.put_object.call_count, 1)
-            mock_conn.put_object.assert_called_with('test_c_segments',
-                                                    'test_s_1',
-                                                    mock.ANY,
-                                                    content_length=10,
-                                                    response_dict={})
+            mock_conn.put_object.assert_called_with(
+                'test_c_segments', 'test_s_1',
+                mock.ANY,
+                content_length=10,
+                content_type='application/swiftclient-segment',
+                response_dict={})
             contents = mock_conn.put_object.call_args[0][2]
             # Check that md5sum is not calculated.
             self.assertEqual(contents.get_md5sum(), '')
@@ -1028,11 +1110,12 @@ class TestServiceUpload(_TestServiceBase):
             self.assertIn('md5 mismatch', str(r.get('error')))
 
             self.assertEqual(mock_conn.put_object.call_count, 1)
-            mock_conn.put_object.assert_called_with('test_c_segments',
-                                                    'test_s_1',
-                                                    mock.ANY,
-                                                    content_length=10,
-                                                    response_dict={})
+            mock_conn.put_object.assert_called_with(
+                'test_c_segments', 'test_s_1',
+                mock.ANY,
+                content_length=10,
+                content_type='application/swiftclient-segment',
+                response_dict={})
             contents = mock_conn.put_object.call_args[0][2]
             self.assertEqual(contents.get_md5sum(), md5(b'b' * 10).hexdigest())
 
@@ -1348,6 +1431,142 @@ class TestServiceUpload(_TestServiceBase):
                 errors.append(msg)
         self.assertFalse(errors, "\nERRORS:\n%s" % '\n'.join(errors))
 
+    def test_create_dir_marker_job_unchanged(self):
+        mock_conn = mock.Mock()
+        mock_conn.head_object.return_value = {
+            'content-type': 'application/directory',
+            'content-length': '0',
+            'x-object-meta-mtime': '1.234000',
+            'etag': md5().hexdigest()}
+
+        s = SwiftService()
+        with mock.patch('swiftclient.service.get_conn',
+                        return_value=mock_conn):
+            with mock.patch('swiftclient.service.getmtime',
+                            return_value=1.234):
+                r = s._create_dir_marker_job(conn=mock_conn,
+                                             container='test_c',
+                                             obj='test_o',
+                                             path='test',
+                                             options={'changed': True,
+                                                      'skip_identical': True,
+                                                      'leave_segments': True,
+                                                      'header': '',
+                                                      'segment_size': 10})
+        self.assertEqual({
+            'action': 'create_dir_marker',
+            'container': 'test_c',
+            'object': 'test_o',
+            'path': 'test',
+            'headers': {'x-object-meta-mtime': '1.234000'},
+            # NO response dict!
+            'success': True,
+        }, r)
+        self.assertEqual([], mock_conn.put_object.mock_calls)
+
+    def test_create_dir_marker_job_unchanged_old_type(self):
+        mock_conn = mock.Mock()
+        mock_conn.head_object.return_value = {
+            'content-type': 'text/directory',
+            'content-length': '0',
+            'x-object-meta-mtime': '1.000000',
+            'etag': md5().hexdigest()}
+
+        s = SwiftService()
+        with mock.patch('swiftclient.service.get_conn',
+                        return_value=mock_conn):
+            with mock.patch('swiftclient.service.time',
+                            return_value=1.234):
+                r = s._create_dir_marker_job(conn=mock_conn,
+                                             container='test_c',
+                                             obj='test_o',
+                                             options={'changed': True,
+                                                      'skip_identical': True,
+                                                      'leave_segments': True,
+                                                      'header': '',
+                                                      'segment_size': 10})
+        self.assertEqual({
+            'action': 'create_dir_marker',
+            'container': 'test_c',
+            'object': 'test_o',
+            'path': None,
+            'headers': {'x-object-meta-mtime': '1.000000'},
+            # NO response dict!
+            'success': True,
+        }, r)
+        self.assertEqual([], mock_conn.put_object.mock_calls)
+
+    def test_create_dir_marker_job_overwrites_bad_type(self):
+        mock_conn = mock.Mock()
+        mock_conn.head_object.return_value = {
+            'content-type': 'text/plain',
+            'content-length': '0',
+            'x-object-meta-mtime': '1.000000',
+            'etag': md5().hexdigest()}
+
+        s = SwiftService()
+        with mock.patch('swiftclient.service.get_conn',
+                        return_value=mock_conn):
+            with mock.patch('swiftclient.service.time',
+                            return_value=1.234):
+                r = s._create_dir_marker_job(conn=mock_conn,
+                                             container='test_c',
+                                             obj='test_o',
+                                             options={'changed': True,
+                                                      'skip_identical': True,
+                                                      'leave_segments': True,
+                                                      'header': '',
+                                                      'segment_size': 10})
+        self.assertEqual({
+            'action': 'create_dir_marker',
+            'container': 'test_c',
+            'object': 'test_o',
+            'path': None,
+            'headers': {'x-object-meta-mtime': '1.000000'},
+            'response_dict': {},
+            'success': True,
+        }, r)
+        self.assertEqual([mock.call(
+            'test_c', 'test_o', '',
+            content_length=0,
+            content_type='application/directory',
+            headers={'x-object-meta-mtime': '1.000000'},
+            response_dict={})], mock_conn.put_object.mock_calls)
+
+    def test_create_dir_marker_job_missing(self):
+        mock_conn = mock.Mock()
+        mock_conn.head_object.side_effect = \
+            ClientException('Not Found', http_status=404)
+
+        s = SwiftService()
+        with mock.patch('swiftclient.service.get_conn',
+                        return_value=mock_conn):
+            with mock.patch('swiftclient.service.time',
+                            return_value=1.234):
+                r = s._create_dir_marker_job(conn=mock_conn,
+                                             container='test_c',
+                                             obj='test_o',
+                                             options={'changed': True,
+                                                      'skip_identical': True,
+                                                      'leave_segments': True,
+                                                      'header': '',
+                                                      'segment_size': 10})
+        self.assertEqual({
+            'action': 'create_dir_marker',
+            'container': 'test_c',
+            'object': 'test_o',
+            'path': None,
+            'headers': {'x-object-meta-mtime': '1.000000'},
+            'response_dict': {},
+            'success': True,
+        }, r)
+        self.assertEqual([mock.call(
+            'test_c', 'test_o', '',
+            content_length=0,
+            content_type='application/directory',
+            headers={'x-object-meta-mtime': '1.000000'},
+            response_dict={})], mock_conn.put_object.mock_calls)
+
 
 class TestServiceDownload(_TestServiceBase):
 
@@ -1655,16 +1874,15 @@ class TestServiceDownload(_TestServiceBase):
         self.assertEqual(expected_r, actual_r)
 
     def test_download(self):
-        service = SwiftService()
         with mock.patch('swiftclient.service.Connection') as mock_conn:
             header = {'content-length': self.obj_len,
                       'etag': self.obj_etag}
             mock_conn.get_object.return_value = header, self._readbody()
 
-            resp = service._download_object_job(mock_conn,
-                                                'c',
-                                                'test',
-                                                self.opts)
+            resp = SwiftService()._download_object_job(mock_conn,
+                                                       'c',
+                                                       'test',
+                                                       self.opts)
 
         self.assertIsNone(resp.get('error'))
         self.assertIs(True, resp['success'])
@@ -1686,10 +1904,9 @@ class TestServiceDownload(_TestServiceBase):
         mock_down_cont.assert_not_called()
 
         next(service.download('c', options=self.opts), None)
-        self.assertEqual(True, mock_down_cont.called)
+        self.assertTrue(mock_down_cont.called)
 
     def test_download_with_output_dir(self):
-        service = SwiftService()
         with mock.patch('swiftclient.service.Connection') as mock_conn:
             header = {'content-length': self.obj_len,
                       'etag': self.obj_etag}
@@ -1697,10 +1914,10 @@ class TestServiceDownload(_TestServiceBase):
 
             options = self.opts.copy()
             options['out_directory'] = 'temp_dir'
-            resp = service._download_object_job(mock_conn,
-                                                'c',
-                                                'example/test',
-                                                options)
+            resp = SwiftService()._download_object_job(mock_conn,
+                                                       'c',
+                                                       'example/test',
+                                                       options)
 
         self.assertIsNone(resp.get('error'))
         self.assertIs(True, resp['success'])
@@ -1709,7 +1926,6 @@ class TestServiceDownload(_TestServiceBase):
         self.assertEqual(resp['path'], 'temp_dir/example/test')
 
     def test_download_with_remove_prefix(self):
-        service = SwiftService()
         with mock.patch('swiftclient.service.Connection') as mock_conn:
             header = {'content-length': self.obj_len,
                       'etag': self.obj_etag}
@@ -1718,10 +1934,10 @@ class TestServiceDownload(_TestServiceBase):
             options = self.opts.copy()
             options['prefix'] = 'example/'
             options['remove_prefix'] = True
-            resp = service._download_object_job(mock_conn,
-                                                'c',
-                                                'example/test',
-                                                options)
+            resp = SwiftService()._download_object_job(mock_conn,
+                                                       'c',
+                                                       'example/test',
+                                                       options)
 
         self.assertIsNone(resp.get('error'))
         self.assertIs(True, resp['success'])
@@ -1730,7 +1946,6 @@ class TestServiceDownload(_TestServiceBase):
         self.assertEqual(resp['path'], 'test')
 
     def test_download_with_remove_prefix_and_remove_slashes(self):
-        service = SwiftService()
         with mock.patch('swiftclient.service.Connection') as mock_conn:
             header = {'content-length': self.obj_len,
                       'etag': self.obj_etag}
@@ -1739,10 +1954,10 @@ class TestServiceDownload(_TestServiceBase):
             options = self.opts.copy()
             options['prefix'] = 'example'
             options['remove_prefix'] = True
-            resp = service._download_object_job(mock_conn,
-                                                'c',
-                                                'example/test',
-                                                options)
+            resp = SwiftService()._download_object_job(mock_conn,
+                                                       'c',
+                                                       'example/test',
+                                                       options)
 
         self.assertIsNone(resp.get('error'))
         self.assertIs(True, resp['success'])
@@ -1751,7 +1966,6 @@ class TestServiceDownload(_TestServiceBase):
         self.assertEqual(resp['path'], 'test')
 
     def test_download_with_output_dir_and_remove_prefix(self):
-        service = SwiftService()
         with mock.patch('swiftclient.service.Connection') as mock_conn:
             header = {'content-length': self.obj_len,
                       'etag': self.obj_etag}
@@ -1761,10 +1975,10 @@ class TestServiceDownload(_TestServiceBase):
             options['prefix'] = 'example'
             options['out_directory'] = 'new/dir'
             options['remove_prefix'] = True
-            resp = service._download_object_job(mock_conn,
-                                                'c',
-                                                'example/test',
-                                                options)
+            resp = SwiftService()._download_object_job(mock_conn,
+                                                       'c',
+                                                       'example/test',
+                                                       options)
 
         self.assertIsNone(resp.get('error'))
         self.assertIs(True, resp['success'])
@@ -2130,3 +2344,118 @@ class TestServiceDownload(_TestServiceBase):
                           resp_chunk_size=65536,
                           headers={'If-None-Match': on_disk_md5},
                           response_dict={})])
+
+
+class TestServicePost(_TestServiceBase):
+
+    def setUp(self):
+        super(TestServicePost, self).setUp()
+        self.opts = swiftclient.service._default_local_options.copy()
+
+    @mock.patch('swiftclient.service.MultiThreadingManager')
+    @mock.patch('swiftclient.service.ResultsIterator')
+    def test_object_post(self, res_iter, thread_manager):
+        """
+        Check post method translates strings and objects to _post_object_job
+        calls correctly
+        """
+        tm_instance = Mock()
+        thread_manager.return_value = tm_instance
+
+        self.opts.update({'meta': ["meta1:test1"], "header": ["hdr1:test1"]})
+        spo = swiftclient.service.SwiftPostObject(
+            "test_spo",
+            {'meta': ["meta1:test2"], "header": ["hdr1:test2"]})
+
+        SwiftService().post('test_c', ['test_o', spo], self.opts)
+
+        calls = [
+            mock.call(
+                SwiftService._post_object_job, 'test_c', 'test_o',
+                {
+                    "X-Object-Meta-Meta1": "test1",
+                    "Hdr1": "test1"},
+                {}),
+            mock.call(
+                SwiftService._post_object_job, 'test_c', 'test_spo',
+                {
+                    "X-Object-Meta-Meta1": "test2",
+                    "Hdr1": "test2"},
+                {}),
+        ]
+        tm_instance.object_uu_pool.submit.assert_has_calls(calls)
+        self.assertEqual(
+            tm_instance.object_uu_pool.submit.call_count, len(calls))
+
+        res_iter.assert_called_with(
+            [tm_instance.object_uu_pool.submit()] * len(calls))
+
+
+class TestServiceCopy(_TestServiceBase):
+
+    def setUp(self):
+        super(TestServiceCopy, self).setUp()
+        self.opts = swiftclient.service._default_local_options.copy()
+
+    @mock.patch('swiftclient.service.MultiThreadingManager')
+    @mock.patch('swiftclient.service.interruptable_as_completed')
+    def test_object_copy(self, inter_compl, thread_manager):
+        """
+        Check copy method translates strings and objects to _copy_object_job
+        calls correctly
+        """
+        tm_instance = Mock()
+        thread_manager.return_value = tm_instance
+
+        self.opts.update({'meta': ["meta1:test1"], "header": ["hdr1:test1"]})
+        sco = swiftclient.service.SwiftCopyObject(
+            "test_sco",
+            options={'meta': ["meta1:test2"], "header": ["hdr1:test2"],
+                     'destination': "/cont_new/test_sco"})
+
+        res = SwiftService().copy('test_c', ['test_o', sco], self.opts)
+        res = list(res)
+
+        calls = [
+            mock.call(
+                SwiftService._create_container_job, 'cont_new', headers={}),
+        ]
+        tm_instance.container_pool.submit.assert_has_calls(calls,
+                                                           any_order=True)
+        self.assertEqual(
+            tm_instance.container_pool.submit.call_count, len(calls))
+
+        calls = [
+            mock.call(
+                SwiftService._copy_object_job, 'test_c', 'test_o',
+                None,
+                {
+                    "X-Object-Meta-Meta1": "test1",
+                    "Hdr1": "test1"},
+                False),
+            mock.call(
+                SwiftService._copy_object_job, 'test_c', 'test_sco',
+                '/cont_new/test_sco',
+                {
+                    "X-Object-Meta-Meta1": "test2",
+                    "Hdr1": "test2"},
+                False),
+        ]
+        tm_instance.object_uu_pool.submit.assert_has_calls(calls)
+        self.assertEqual(
+            tm_instance.object_uu_pool.submit.call_count, len(calls))
+
+        inter_compl.assert_called_with(
+            [tm_instance.object_uu_pool.submit()] * len(calls))
+
+    def test_object_copy_fail_dest(self):
+        """
+        Destination in incorrect format and destination with object
+        used when multiple objects are copied raises SwiftError
+        """
+        with self.assertRaises(SwiftError):
+            list(SwiftService().copy('test_c', ['test_o'],
+                                     {'destination': 'cont'}))
+        with self.assertRaises(SwiftError):
+            list(SwiftService().copy('test_c', ['test_o', 'test_o2'],
+                                     {'destination': '/cont/obj'}))

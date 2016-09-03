@@ -57,6 +57,11 @@ def fake_get_auth_keystone(expected_os_options=None, exc=None,
            actual_kwargs['cacert'] is None:
             from swiftclient import client as c
             raise c.ClientException("unverified-certificate")
+        if auth_url.startswith("https") and \
+           auth_url.endswith("client-certificate") and \
+           not (actual_kwargs['cert'] and actual_kwargs['cert_key']):
+            from swiftclient import client as c
+            raise c.ClientException("noclient-certificate")
 
         return storage_url, token
     return fake_get_auth_keystone
@@ -87,17 +92,19 @@ def fake_http_connect(*code_iter, **kwargs):
 
         def __init__(self, status, etag=None, body='', timestamp='1',
                      headers=None):
-            self.status = status
+            self.status_code = self.status = status
             self.reason = 'Fake'
+            self.scheme = 'http'
             self.host = '1.2.3.4'
             self.port = '1234'
             self.sent = 0
             self.received = 0
             self.etag = etag
-            self.body = body
+            self.content = self.body = body
             self.timestamp = timestamp
             self._is_closed = True
             self.headers = headers or {}
+            self.request = None
 
         def getresponse(self):
             if kwargs.get('raise_exc'):
@@ -213,6 +220,7 @@ class MockHttpTest(unittest.TestCase):
             on_request = kwargs.get('on_request')
 
             def wrapper(url, proxy=None, cacert=None, insecure=False,
+                        cert=None, cert_key=None,
                         ssl_compression=True, timeout=None):
                 if storage_url:
                     self.assertEqual(storage_url, url)
@@ -223,15 +231,18 @@ class MockHttpTest(unittest.TestCase):
                     pass
                 conn = RequestsWrapper()
 
-                def request(method, url, *args, **kwargs):
+                def request(method, path, *args, **kwargs):
                     try:
                         conn.resp = self.fake_connect()
                     except StopIteration:
                         self.fail('Unexpected %s request for %s' % (
-                            method, url))
-                    self.request_log.append((parsed, method, url, args,
+                            method, path))
+                    self.request_log.append((parsed, method, path, args,
                                              kwargs, conn.resp))
                     conn.host = conn.resp.host
+                    conn.resp.request = RequestsWrapper()
+                    conn.resp.request.url = '%s://%s%s' % (
+                        conn.resp.scheme, conn.resp.host, path)
                     conn.resp.has_been_read = False
                     _orig_read = conn.resp.read
 
@@ -240,15 +251,15 @@ class MockHttpTest(unittest.TestCase):
                         return _orig_read(*args, **kwargs)
                     conn.resp.read = read
                     if on_request:
-                        status = on_request(method, url, *args, **kwargs)
+                        status = on_request(method, path, *args, **kwargs)
                         conn.resp.status = status
                     if auth_token:
                         headers = args[1]
                         self.assertEqual(auth_token,
                                          headers.get('X-Auth-Token'))
                     if query_string:
-                        self.assertTrue(url.endswith('?' + query_string))
-                    if url.endswith('invalid_cert') and not insecure:
+                        self.assertTrue(path.endswith('?' + query_string))
+                    if path.endswith('invalid_cert') and not insecure:
                         from swiftclient import client as c
                         raise c.ClientException("invalid_certificate")
                     if exc:
@@ -482,6 +493,9 @@ class CaptureOutput(object):
 
     def __eq__(self, other):
         return self.out == other
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def __getattr__(self, name):
         return getattr(self.out, name)

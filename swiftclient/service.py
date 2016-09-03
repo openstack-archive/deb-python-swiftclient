@@ -86,11 +86,24 @@ class SwiftError(Exception):
 
 
 def process_options(options):
-    if (not (options.get('auth') and options.get('user')
-             and options.get('key'))
-            and options.get('auth_version') != '3'):
-        # Use keystone 2.0 auth if any of the old-style args are missing
+    # tolerate sloppy auth_version
+    if options.get('auth_version') == '3.0':
+        options['auth_version'] = '3'
+    elif options.get('auth_version') == '2':
         options['auth_version'] = '2.0'
+
+    if options.get('auth_version') not in ('2.0', '3') and not all(
+            options.get(key) for key in ('auth', 'user', 'key')):
+        # Use keystone auth if any of the new-style args are present
+        if any(options.get(k) for k in (
+                'os_user_domain_id',
+                'os_user_domain_name',
+                'os_project_domain_id',
+                'os_project_domain_name')):
+            # Use v3 if there's any reference to domains
+            options['auth_version'] = '3'
+        else:
+            options['auth_version'] = '2.0'
 
     # Use new-style args if old ones not present
     if not options['auth'] and options['os_auth_url']:
@@ -148,6 +161,8 @@ def _build_default_global_options():
         "os_service_type": environ.get('OS_SERVICE_TYPE'),
         "os_endpoint_type": environ.get('OS_ENDPOINT_TYPE'),
         "os_cacert": environ.get('OS_CACERT'),
+        "os_cert": environ.get('OS_CERT'),
+        "os_key": environ.get('OS_KEY'),
         "insecure": config_true_value(environ.get('SWIFTCLIENT_INSECURE')),
         "ssl_compression": False,
         'segment_threads': 10,
@@ -185,10 +200,16 @@ _default_local_options = {
     'human': False,
     'dir_marker': False,
     'checksum': True,
-    'shuffle': False
+    'shuffle': False,
+    'destination': None,
+    'fresh_metadata': False,
 }
 
 POLICY = 'X-Storage-Policy'
+KNOWN_DIR_MARKERS = (
+    'application/directory',  # Preferred
+    'text/directory',  # Historically relevant
+)
 
 
 def get_from_queue(q, timeout=864000):
@@ -236,6 +257,8 @@ def get_conn(options):
                       snet=options['snet'],
                       cacert=options['os_cacert'],
                       insecure=options['insecure'],
+                      cert=options['os_cert'],
+                      cert_key=options['os_key'],
                       ssl_compression=options['ssl_compression'])
 
 
@@ -259,7 +282,7 @@ def split_headers(options, prefix=''):
     for item in options:
         split_item = item.split(':', 1)
         if len(split_item) == 2:
-            headers[(prefix + split_item[0]).title()] = split_item[1]
+            headers[(prefix + split_item[0]).title()] = split_item[1].strip()
         else:
             raise SwiftError(
                 "Metadata parameter %s must contain a ':'.\n%s"
@@ -300,13 +323,48 @@ class SwiftPostObject(object):
     specified separately for each individual object.
     """
     def __init__(self, object_name, options=None):
-        if not isinstance(object_name, string_types) or not object_name:
+        if not (isinstance(object_name, string_types) and object_name):
             raise SwiftError(
                 "Object names must be specified as non-empty strings"
             )
+        self.object_name = object_name
+        self.options = options
+
+
+class SwiftCopyObject(object):
+    """
+    Class for specifying an object copy,
+    allowing the destination/headers/metadata/fresh_metadata to be specified
+    separately for each individual object.
+    destination and fresh_metadata should be set in options
+    """
+    def __init__(self, object_name, options=None):
+        if not (isinstance(object_name, string_types) and object_name):
+            raise SwiftError(
+                "Object names must be specified as non-empty strings"
+            )
+
+        self.object_name = object_name
+        self.options = options
+
+        if self.options is None:
+            self.destination = None
+            self.fresh_metadata = False
         else:
-            self.object_name = object_name
-            self.options = options
+            self.destination = self.options.get('destination')
+            self.fresh_metadata = self.options.get('fresh_metadata', False)
+
+        if self.destination is not None:
+            destination_components = self.destination.split('/')
+            if destination_components[0] or len(destination_components) < 2:
+                raise SwiftError("destination must be in format /cont[/obj]")
+            if not destination_components[-1]:
+                raise SwiftError("destination must not end in a slash")
+            if len(destination_components) == 2:
+                # only container set in destination
+                self.destination = "{0}/{1}".format(
+                    self.destination, object_name
+                )
 
 
 class _SwiftReader(object):
@@ -315,7 +373,7 @@ class _SwiftReader(object):
     errors on failures caused by either invalid md5sum or size of the
     data read.
     """
-    def __init__(self, path, body, headers):
+    def __init__(self, path, body, headers, checksum=True):
         self._path = path
         self._body = body
         self._actual_read = 0
@@ -324,7 +382,7 @@ class _SwiftReader(object):
         self._expected_etag = headers.get('etag')
 
         if ('x-object-manifest' not in headers
-                and 'x-static-large-object' not in headers):
+                and 'x-static-large-object' not in headers and checksum):
             self._actual_md5 = md5()
 
         if 'content-length' in headers:
@@ -569,7 +627,7 @@ class SwiftService(object):
 
                             {
                                 'meta': [],
-                                'headers': [],
+                                'header': [],
                                 'read_acl': None,   # For containers only
                                 'write_acl': None,  # For containers only
                                 'sync_to': None,    # For containers only
@@ -700,10 +758,10 @@ class SwiftService(object):
                     if 'meta' in obj_options:
                         headers.update(
                             split_headers(
-                                obj_options['meta'], 'X-Object-Meta'
+                                obj_options['meta'], 'X-Object-Meta-'
                             )
                         )
-                    if 'headers' in obj_options:
+                    if 'header' in obj_options:
                         headers.update(
                             split_headers(obj_options['header'], '')
                         )
@@ -883,7 +941,7 @@ class SwiftService(object):
 
     @staticmethod
     def _list_container_job(conn, container, options, result_queue):
-        marker = ''
+        marker = options.get('marker', '')
         error = None
         try:
             while True:
@@ -959,6 +1017,7 @@ class SwiftService(object):
                                 'header': [],
                                 'skip_identical': False,
                                 'out_directory': None,
+                                'checksum': True,
                                 'out_file': None,
                                 'remove_prefix': False,
                                 'shuffle' : False
@@ -1114,7 +1173,8 @@ class SwiftService(object):
 
             headers_receipt = time()
 
-            obj_body = _SwiftReader(path, body, headers)
+            obj_body = _SwiftReader(path, body, headers,
+                                    options.get('checksum', True))
 
             no_file = options['no_download']
             if out_file == "-" and not no_file:
@@ -1130,9 +1190,8 @@ class SwiftService(object):
 
             fp = None
             try:
-                content_type = headers.get('content-type')
-                if (content_type and
-                   content_type.split(';', 1)[0] == 'text/directory'):
+                content_type = headers.get('content-type', '').split(';', 1)[0]
+                if content_type in KNOWN_DIR_MARKERS:
                     make_dir = not no_file and out_file != "-"
                     if make_dir and not isdir(path):
                         mkdirs(path)
@@ -1590,12 +1649,12 @@ class SwiftService(object):
         if options['changed']:
             try:
                 headers = conn.head_object(container, obj)
-                ct = headers.get('content-type')
+                ct = headers.get('content-type', '').split(';', 1)[0]
                 cl = int(headers.get('content-length'))
                 et = headers.get('etag')
                 mt = headers.get('x-object-meta-mtime')
 
-                if (ct.split(';', 1)[0] == 'text/directory' and
+                if (ct in KNOWN_DIR_MARKERS and
                         cl == 0 and
                         et == EMPTY_ETAG and
                         mt == put_headers['x-object-meta-mtime']):
@@ -1614,7 +1673,7 @@ class SwiftService(object):
                     return res
         try:
             conn.put_object(container, obj, '', content_length=0,
-                            content_type='text/directory',
+                            content_type=KNOWN_DIR_MARKERS[0],
                             headers=put_headers,
                             response_dict=results_dict)
             res.update({
@@ -1657,10 +1716,13 @@ class SwiftService(object):
             fp.seek(segment_start)
 
             contents = LengthWrapper(fp, segment_size, md5=options['checksum'])
-            etag = conn.put_object(segment_container,
-                                   segment_name, contents,
-                                   content_length=segment_size,
-                                   response_dict=results_dict)
+            etag = conn.put_object(
+                segment_container,
+                segment_name,
+                contents,
+                content_length=segment_size,
+                content_type='application/swiftclient-segment',
+                response_dict=results_dict)
 
             if options['checksum'] and etag and etag != contents.get_md5sum():
                 raise SwiftError('Segment {0}: upload verification failed: '
@@ -2363,6 +2425,191 @@ class SwiftService(object):
             'attempts': conn.attempts,
             'response_dict': results_dict
         })
+
+        return res
+
+    # Copy related methods
+    #
+    def copy(self, container, objects, options=None):
+        """
+        Copy operations on a list of objects in a container. Destination
+        containers will be created.
+
+        :param container: The container from which to copy the objects.
+        :param objects: A list of object names (strings) or SwiftCopyObject
+                        instances containing an object name and an
+                        options dict (can be None) to override the options for
+                        that individual copy operation::
+
+                            [
+                                'object_name',
+                                SwiftCopyObject(
+                                    'object_name',
+                                     options={
+                                        'destination': '/container/object',
+                                        'fresh_metadata': False,
+                                        ...
+                                        }),
+                                ...
+                            ]
+
+                        The options dict is described below.
+        :param options: A dictionary containing options to override the global
+                        options specified during the service object creation.
+                        These options are applied to all copy operations
+                        performed by this call, unless overridden on a per
+                        object basis.
+                        The options "destination" and "fresh_metadata" do
+                        not need to be set, in this case objects will be
+                        copied onto themselves and metadata will not be
+                        refreshed.
+                        The option "destination" can also be specified in the
+                        format '/container', in which case objects without an
+                        explicit destination will be copied to the destination
+                        /container/original_object_name. Combinations of
+                        multiple objects and a destination in the format
+                        '/container/object' is invalid. Possible options are
+                        given below::
+
+                            {
+                                'meta': [],
+                                'header': [],
+                                'destination': '/container/object',
+                                'fresh_metadata': False,
+                            }
+
+        :returns: A generator returning the results of copying the given list
+                  of objects.
+
+        :raises: SwiftError
+        """
+        if options is not None:
+            options = dict(self._options, **options)
+        else:
+            options = self._options
+
+        # Try to create the container, just in case it doesn't exist. If this
+        # fails, it might just be because the user doesn't have container PUT
+        # permissions, so we'll ignore any error. If there's really a problem,
+        # it'll surface on the first object COPY.
+        containers = set(
+            next(p for p in obj.destination.split("/") if p)
+            for obj in objects
+            if isinstance(obj, SwiftCopyObject) and obj.destination
+        )
+        if options.get('destination'):
+            destination_split = options['destination'].split('/')
+            if destination_split[0]:
+                raise SwiftError("destination must be in format /cont[/obj]")
+            _str_objs = [
+                o for o in objects if not isinstance(o, SwiftCopyObject)
+            ]
+            if len(destination_split) > 2 and len(_str_objs) > 1:
+                # TODO (clayg): could be useful to copy multiple objects into
+                # a destination like "/container/common/prefix/for/objects/"
+                # where the trailing "/" indicates the destination option is a
+                # prefix!
+                raise SwiftError("Combination of multiple objects and "
+                                 "destination including object is invalid")
+            if destination_split[-1] == '':
+                # N.B. this protects the above case
+                raise SwiftError("destination can not end in a slash")
+            containers.add(destination_split[1])
+
+        policy_header = {}
+        _header = split_headers(options["header"])
+        if POLICY in _header:
+            policy_header[POLICY] = _header[POLICY]
+        create_containers = [
+            self.thread_manager.container_pool.submit(
+                self._create_container_job, cont, headers=policy_header)
+            for cont in containers
+        ]
+
+        # wait for container creation jobs to complete before any COPY
+        for r in interruptable_as_completed(create_containers):
+            res = r.result()
+            yield res
+
+        copy_futures = []
+        copy_objects = self._make_copy_objects(objects, options)
+        for copy_object in copy_objects:
+            obj = copy_object.object_name
+            obj_options = copy_object.options
+            destination = copy_object.destination
+            fresh_metadata = copy_object.fresh_metadata
+            headers = split_headers(
+                options['meta'], 'X-Object-Meta-')
+            # add header options to the headers object for the request.
+            headers.update(
+                split_headers(options['header'], ''))
+            if obj_options is not None:
+                if 'meta' in obj_options:
+                    headers.update(
+                        split_headers(
+                            obj_options['meta'], 'X-Object-Meta-'
+                        )
+                    )
+                if 'header' in obj_options:
+                    headers.update(
+                        split_headers(obj_options['header'], '')
+                    )
+
+            copy = self.thread_manager.object_uu_pool.submit(
+                self._copy_object_job, container, obj, destination,
+                headers, fresh_metadata
+            )
+            copy_futures.append(copy)
+
+        for r in interruptable_as_completed(copy_futures):
+            res = r.result()
+            yield res
+
+    @staticmethod
+    def _make_copy_objects(objects, options):
+        copy_objects = []
+
+        for o in objects:
+            if isinstance(o, string_types):
+                obj = SwiftCopyObject(o, options)
+                copy_objects.append(obj)
+            elif isinstance(o, SwiftCopyObject):
+                copy_objects.append(o)
+            else:
+                raise SwiftError(
+                    "The copy operation takes only strings or "
+                    "SwiftCopyObjects as input",
+                    obj=o)
+
+        return copy_objects
+
+    @staticmethod
+    def _copy_object_job(conn, container, obj, destination, headers,
+                         fresh_metadata):
+        response_dict = {}
+        res = {
+            'success': True,
+            'action': 'copy_object',
+            'container': container,
+            'object': obj,
+            'destination': destination,
+            'headers': headers,
+            'fresh_metadata': fresh_metadata,
+            'response_dict': response_dict
+        }
+        try:
+            conn.copy_object(
+                container, obj, destination=destination, headers=headers,
+                fresh_metadata=fresh_metadata, response_dict=response_dict)
+        except Exception as err:
+            traceback, err_time = report_traceback()
+            logger.exception(err)
+            res.update({
+                'success': False,
+                'error': err,
+                'traceback': traceback,
+                'error_timestamp': err_time
+            })
 
         return res
 
