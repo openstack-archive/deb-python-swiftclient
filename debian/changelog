@@ -1,3 +1,10 @@
+python-swiftclient (1:3.1.0-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+  * Bumped required version of python-keystoneclient
+
+ -- Ondřej Nový <onovy@debian.org>  Sat, 03 Sep 2016 11:36:37 +0200
+
 python-swiftclient (1:3.0.0-4) unstable; urgency=medium
 
   * Use OSLO_PACKAGE_VERSION from openstack-pkg-tools
