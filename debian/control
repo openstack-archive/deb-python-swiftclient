@@ -35,6 +35,7 @@ Standards-Version: 3.9.8
 Vcs-Git: https://anonscm.debian.org/git/openstack/python-swiftclient.git
 Vcs-Browser: https://anonscm.debian.org/cgit/openstack/python-swiftclient.git
 Homepage: https://github.com/openstack/python-swiftclient
+Testsuite: autopkgtest-pkg-python
 
 Package: python-swiftclient
 Architecture: all
