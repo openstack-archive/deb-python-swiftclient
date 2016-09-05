@@ -1,4 +1,5 @@
 [gerrit]
 host=review.openstack.org
 port=29418
-project=openstack/python-swiftclient.git
+project=openstack/deb-python-swiftclient.git
+defaultbranch=debian/newton
