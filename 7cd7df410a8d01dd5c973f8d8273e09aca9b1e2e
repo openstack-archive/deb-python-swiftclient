@@ -1,0 +1,10 @@
+Code-Review+1: Mohit Motiani <mohit.motiani@intel.com>
+Code-Review+2: Joel Wright <joel.wright@sohonet.com>
+Code-Review+2: Alistair Coles <alistair.coles@hpe.com>
+Workflow+1: Alistair Coles <alistair.coles@hpe.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 05 Sep 2016 18:55:01 +0000
+Reviewed-on: https://review.openstack.org/361465
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master
