@@ -1,0 +1,8 @@
+Code-Review+2: John Dickinson <me@not.mn>
+Workflow+1: John Dickinson <me@not.mn>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 01 Dec 2015 05:48:36 +0000
+Reviewed-on: https://review.openstack.org/251585
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/stable/liberty

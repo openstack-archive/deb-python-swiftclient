@@ -1,0 +1,9 @@
+Code-Review+1: venkatamahesh <Venkata.Kotha@infinite.com>
+Code-Review+2: John Dickinson <me@not.mn>
+Workflow+1: John Dickinson <me@not.mn>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 01 Dec 2015 08:38:26 +0000
+Reviewed-on: https://review.openstack.org/226034
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/stable/liberty
