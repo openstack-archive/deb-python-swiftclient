@@ -18,13 +18,13 @@ Build-Depends: debhelper (>= 9),
 Build-Depends-Indep: python-concurrent.futures,
                      python-coverage,
                      python-hacking (>= 0.10.0),
-                     python-keystoneclient,
+                     python-keystoneclient (>= 1:0.7.0),
                      python-mock (>= 1.2),
-                     python-oslosphinx,
+                     python-oslosphinx (>= 4.7.0),
                      python-requests,
                      python-six,
                      python3-hacking (>= 0.10.0),
-                     python3-keystoneclient,
+                     python3-keystoneclient (>= 1:0.7.0),
                      python3-mock (>= 1.2),
                      python3-requests,
                      python3-six,
@@ -35,6 +35,7 @@ Standards-Version: 3.9.8
 Vcs-Git: https://anonscm.debian.org/git/openstack/python-swiftclient.git
 Vcs-Browser: https://anonscm.debian.org/cgit/openstack/python-swiftclient.git
 Homepage: https://github.com/openstack/python-swiftclient
+Testsuite: autopkgtest-pkg-python
 
 Package: python-swiftclient
 Architecture: all
