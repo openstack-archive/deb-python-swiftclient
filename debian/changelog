@@ -1,6 +1,7 @@
 python-swiftclient (1:3.1.0-2) UNRELEASED; urgency=medium
 
   * d/s/options: extend-diff-ignore of .gitreview
+  * d/control: Using OpenStack's Gerrit as VCS URLs.
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 23 Sep 2016 16:34:08 +0200
 
