@@ -1,3 +1,9 @@
+python-swiftclient (1:3.1.0-3) UNRELEASED; urgency=medium
+
+  * Bumped debhelper version to 10
+
+ -- Ondřej Nový <onovy@debian.org>  Thu, 17 Nov 2016 16:42:11 +0100
+
 python-swiftclient (1:3.1.0-2) unstable; urgency=medium
 
   * Uploading to unstable
