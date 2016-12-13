@@ -1,0 +1,9 @@
+Code-Review+2: Thiago da Silva <thiago@redhat.com>
+Code-Review+2: Alistair Coles <alistair.coles@hpe.com>
+Workflow+1: Alistair Coles <alistair.coles@hpe.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 13 Dec 2016 23:00:01 +0000
+Reviewed-on: https://review.openstack.org/390119
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master
