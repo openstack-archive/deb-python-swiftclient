@@ -1,4 +1,4 @@
-python-swiftclient (1:3.1.0-3) UNRELEASED; urgency=medium
+python-swiftclient (1:3.1.0-3) unstable; urgency=medium
 
   * Bumped debhelper version to 10
   * d/copyright: Fixed Apache-2 license text
@@ -7,7 +7,7 @@ python-swiftclient (1:3.1.0-3) UNRELEASED; urgency=medium
   * Bump required version of python-concurrent.futures,
     python{,3}-pkg-resources and python{,3}-setuptools
 
- -- Ondřej Nový <onovy@debian.org>  Thu, 17 Nov 2016 16:42:11 +0100
+ -- Ondřej Nový <onovy@debian.org>  Wed, 28 Dec 2016 20:35:42 +0100
 
 python-swiftclient (1:3.1.0-2) unstable; urgency=medium
 
