@@ -32,8 +32,8 @@ Build-Depends-Indep: python-concurrent.futures (>= 3.0),
                      subunit,
                      testrepository,
 Standards-Version: 3.9.8
-Vcs-Git: https://git.openstack.org/openstack/deb-python-swiftclient -b debian/newton
-Vcs-Browser: https://git.openstack.org/cgit/openstack/deb-python-swiftclient?h=debian%2Fnewton
+Vcs-Git: https://git.openstack.org/openstack/deb-python-swiftclient -b debian/ocata
+Vcs-Browser: https://git.openstack.org/cgit/openstack/deb-python-swiftclient?h=debian%2Focata
 Homepage: https://github.com/openstack/python-swiftclient
 Testsuite: autopkgtest-pkg-python
 
