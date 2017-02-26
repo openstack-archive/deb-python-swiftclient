@@ -307,9 +307,8 @@ class _RetryBody(_ObjectBody):
         try:
             buf = self.resp.read(length)
             self.bytes_read += len(buf)
-        except (socket.error, RequestException) as e:
+        except (socket.error, RequestException):
             if self.conn.attempts > self.conn.retries:
-                logger.exception(e)
                 raise
         if (not buf and self.bytes_read < self.expected_length and
                 self.conn.attempts <= self.conn.retries):
@@ -416,11 +415,11 @@ class HTTPConnection(object):
             self.requests_args['timeout'] = timeout
 
     def _request(self, *arg, **kwarg):
-        """ Final wrapper before requests call, to be patched in tests """
+        """Final wrapper before requests call, to be patched in tests"""
         return self.request_session.request(*arg, **kwarg)
 
     def request(self, method, full_path, data=None, headers=None, files=None):
-        """ Encode url and header, then call requests.request """
+        """Encode url and header, then call requests.request"""
         if headers is None:
             headers = {}
         else:
@@ -447,7 +446,7 @@ class HTTPConnection(object):
         return self.request('PUT', full_path, data, headers, files)
 
     def getresponse(self):
-        """ Adapt requests response to httplib interface """
+        """Adapt requests response to httplib interface"""
         self.resp.status = self.resp.status_code
         old_getheader = self.resp.raw.getheader
 
@@ -476,7 +475,7 @@ class HTTPConnection(object):
 
 
 def http_connection(*arg, **kwarg):
-    """ :returns: tuple of (parsed url, connection object) """
+    """:returns: tuple of (parsed url, connection object)"""
     conn = HTTPConnection(*arg, **kwarg)
     return conn.parsed_url, conn
 
@@ -607,8 +606,8 @@ def get_auth(auth_url, user, key, **kwargs):
     :returns: a tuple, (storage_url, token)
 
     N.B. if the optional os_options parameter includes a non-empty
-    'object_storage_url' key it will override the the default storage url
-    returned by the auth service.
+    'object_storage_url' key it will override the default storage url returned
+    by the auth service.
 
     The snet parameter is used for Rackspace's ServiceNet internal network
     implementation. In this function, it simply adds *snet-* to the beginning
@@ -616,6 +615,7 @@ def get_auth(auth_url, user, key, **kwargs):
     use of this network path causes no bandwidth charges but requires the
     client to be running on Rackspace's ServiceNet network.
     """
+    session = kwargs.get('session', None)
     auth_version = kwargs.get('auth_version', '1')
     os_options = kwargs.get('os_options', {})
 
@@ -624,7 +624,14 @@ def get_auth(auth_url, user, key, **kwargs):
     cert = kwargs.get('cert')
     cert_key = kwargs.get('cert_key')
     timeout = kwargs.get('timeout', None)
-    if auth_version in AUTH_VERSIONS_V1:
+
+    if session:
+        service_type = os_options.get('service_type', 'object-store')
+        interface = os_options.get('endpoint_type', 'public')
+        storage_url = session.get_endpoint(service_type=service_type,
+                                           interface=interface)
+        token = session.get_token()
+    elif auth_version in AUTH_VERSIONS_V1:
         storage_url, token = get_auth_1_0(auth_url,
                                           user,
                                           key,
@@ -661,8 +668,8 @@ def get_auth(auth_url, user, key, **kwargs):
                                                timeout=timeout,
                                                auth_version=auth_version)
     else:
-        raise ClientException('Unknown auth_version %s specified.'
-                              % auth_version)
+        raise ClientException('Unknown auth_version %s specified and no '
+                              'session found.' % auth_version)
 
     # Override storage url, if necessary
     if os_options.get('object_storage_url'):
@@ -696,7 +703,7 @@ def store_response(resp, response_dict):
 
 def get_account(url, token, marker=None, limit=None, prefix=None,
                 end_marker=None, http_conn=None, full_listing=False,
-                service_token=None):
+                service_token=None, headers=None):
     """
     Get a listing of containers for the account.
 
@@ -711,20 +718,28 @@ def get_account(url, token, marker=None, limit=None, prefix=None,
     :param full_listing: if True, return a full listing, else returns a max
                          of 10000 listings
     :param service_token: service auth token
+    :param headers: additional headers to include in the request
     :returns: a tuple of (response headers, a list of containers) The response
               headers will be a dict and all header names will be lowercase.
     :raises ClientException: HTTP GET request failed
     """
+    req_headers = {'X-Auth-Token': token, 'Accept-Encoding': 'gzip'}
+    if service_token:
+        req_headers['X-Service-Token'] = service_token
+    if headers:
+        req_headers.update(headers)
+
     if not http_conn:
         http_conn = http_connection(url)
     if full_listing:
         rv = get_account(url, token, marker, limit, prefix,
-                         end_marker, http_conn)
+                         end_marker, http_conn, headers=req_headers)
         listing = rv[1]
         while listing:
             marker = listing[-1]['name']
             listing = get_account(url, token, marker, limit, prefix,
-                                  end_marker, http_conn)[1]
+                                  end_marker, http_conn,
+                                  headers=req_headers)[1]
             if listing:
                 rv[1].extend(listing)
         return rv
@@ -739,14 +754,12 @@ def get_account(url, token, marker=None, limit=None, prefix=None,
     if end_marker:
         qs += '&end_marker=%s' % quote(end_marker)
     full_path = '%s?%s' % (parsed.path, qs)
-    headers = {'X-Auth-Token': token, 'Accept-Encoding': 'gzip'}
-    if service_token:
-        headers['X-Service-Token'] = service_token
     method = 'GET'
-    conn.request(method, full_path, '', headers)
+    conn.request(method, full_path, '', req_headers)
     resp = conn.getresponse()
     body = resp.read()
-    http_log(("%s?%s" % (url, qs), method,), {'headers': headers}, resp, body)
+    http_log(("%s?%s" % (url, qs), method,), {'headers': req_headers},
+             resp, body)
 
     resp_headers = resp_header_dict(resp)
     if resp.status < 200 or resp.status >= 300:
@@ -756,7 +769,8 @@ def get_account(url, token, marker=None, limit=None, prefix=None,
     return resp_headers, parse_api_response(resp_headers, body)
 
 
-def head_account(url, token, http_conn=None, service_token=None):
+def head_account(url, token, http_conn=None, headers=None,
+                 service_token=None):
     """
     Get account stats.
 
@@ -764,6 +778,7 @@ def head_account(url, token, http_conn=None, service_token=None):
     :param token: auth token
     :param http_conn: a tuple of (parsed url, HTTPConnection object),
                       (If None, it will create the conn object)
+    :param headers: additional headers to include in the request
     :param service_token: service auth token
     :returns: a dict containing the response's headers (all header names will
               be lowercase)
@@ -774,13 +789,16 @@ def head_account(url, token, http_conn=None, service_token=None):
     else:
         parsed, conn = http_connection(url)
     method = "HEAD"
-    headers = {'X-Auth-Token': token}
+    req_headers = {'X-Auth-Token': token}
     if service_token:
-        headers['X-Service-Token'] = service_token
-    conn.request(method, parsed.path, '', headers)
+        req_headers['X-Service-Token'] = service_token
+    if headers:
+        req_headers.update(headers)
+
+    conn.request(method, parsed.path, '', req_headers)
     resp = conn.getresponse()
     body = resp.read()
-    http_log((url, method,), {'headers': headers}, resp, body)
+    http_log((url, method,), {'headers': req_headers}, resp, body)
     if resp.status < 200 or resp.status >= 300:
         raise ClientException.from_response(resp, 'Account HEAD failed', body)
     resp_headers = resp_header_dict(resp)
@@ -1047,7 +1065,7 @@ def post_container(url, token, container, headers, http_conn=None,
 
 def delete_container(url, token, container, http_conn=None,
                      response_dict=None, service_token=None,
-                     query_string=None):
+                     query_string=None, headers=None):
     """
     Delete a container
 
@@ -1060,6 +1078,7 @@ def delete_container(url, token, container, http_conn=None,
                      the response - status, reason and headers
     :param service_token: service auth token
     :param query_string: if set will be appended with '?' to generated path
+    :param headers: additional headers to include in the request
     :raises ClientException: HTTP DELETE request failed
     """
     if http_conn:
@@ -1067,7 +1086,12 @@ def delete_container(url, token, container, http_conn=None,
     else:
         parsed, conn = http_connection(url)
     path = '%s/%s' % (parsed.path, quote(container))
-    headers = {'X-Auth-Token': token}
+    if headers:
+        headers = dict(headers)
+    else:
+        headers = {}
+
+    headers['X-Auth-Token'] = token
     if service_token:
         headers['X-Service-Token'] = service_token
     if query_string:
@@ -1498,7 +1522,7 @@ class Connection(object):
                  os_options=None, auth_version="1", cacert=None,
                  insecure=False, cert=None, cert_key=None,
                  ssl_compression=True, retry_on_ratelimit=False,
-                 timeout=None):
+                 timeout=None, session=None):
         """
         :param authurl: authentication URL
         :param user: user name to authenticate as
@@ -1533,7 +1557,9 @@ class Connection(object):
                                    this parameter to True will cause a retry
                                    after a backoff.
         :param timeout: The connect timeout for the HTTP connection.
+        :param session: A keystoneauth session object.
         """
+        self.session = session
         self.authurl = authurl
         self.user = user
         self.key = key
@@ -1577,7 +1603,7 @@ class Connection(object):
 
     def get_auth(self):
         self.url, self.token = get_auth(self.authurl, self.user, self.key,
-                                        snet=self.snet,
+                                        session=self.session, snet=self.snet,
                                         auth_version=self.auth_version,
                                         os_options=self.os_options,
                                         cacert=self.cacert,
@@ -1596,8 +1622,8 @@ class Connection(object):
                                                          None)
         service_user = opts.get('service_username', None)
         service_key = opts.get('service_key', None)
-        return get_auth(self.authurl, service_user,
-                        service_key,
+        return get_auth(self.authurl, service_user, service_key,
+                        session=self.session,
                         snet=self.snet,
                         auth_version=self.auth_version,
                         os_options=service_options,
@@ -1649,24 +1675,26 @@ class Connection(object):
                 return rv
             except SSLError:
                 raise
-            except (socket.error, RequestException) as e:
+            except (socket.error, RequestException):
                 self._add_response_dict(caller_response_dict, kwargs)
                 if self.attempts > self.retries:
-                    logger.exception(e)
                     raise
                 self.http_conn = None
             except ClientException as err:
                 self._add_response_dict(caller_response_dict, kwargs)
                 if err.http_status == 401:
+                    if self.session:
+                        should_retry = self.session.invalidate()
+                    else:
+                        # Without a proper session, just check for auth creds
+                        should_retry = all((self.authurl, self.user, self.key))
+
                     self.url = self.token = self.service_token = None
-                    if retried_auth or not all((self.authurl,
-                                                self.user,
-                                                self.key)):
-                        logger.exception(err)
+
+                    if retried_auth or not should_retry:
                         raise
                     retried_auth = True
                 elif self.attempts > self.retries or err.http_status is None:
-                    logger.exception(err)
                     raise
                 elif err.http_status == 408:
                     self.http_conn = None
@@ -1675,26 +1703,25 @@ class Connection(object):
                 elif self.retry_on_ratelimit and err.http_status == 498:
                     pass
                 else:
-                    logger.exception(err)
                     raise
             sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff)
             if reset_func:
                 reset_func(func, *args, **kwargs)
 
-    def head_account(self):
+    def head_account(self, headers=None):
         """Wrapper for :func:`head_account`"""
-        return self._retry(None, head_account)
+        return self._retry(None, head_account, headers=headers)
 
     def get_account(self, marker=None, limit=None, prefix=None,
-                    end_marker=None, full_listing=False):
+                    end_marker=None, full_listing=False, headers=None):
         """Wrapper for :func:`get_account`"""
         # TODO(unknown): With full_listing=True this will restart the entire
         # listing with each retry. Need to make a better version that just
         # retries where it left off.
         return self._retry(None, get_account, marker=marker, limit=limit,
                            prefix=prefix, end_marker=end_marker,
-                           full_listing=full_listing)
+                           full_listing=full_listing, headers=headers)
 
     def post_account(self, headers, response_dict=None,
                      query_string=None, data=None):
@@ -1733,11 +1760,12 @@ class Connection(object):
                            response_dict=response_dict)
 
     def delete_container(self, container, response_dict=None,
-                         query_string=None):
+                         query_string=None, headers={}):
         """Wrapper for :func:`delete_container`"""
         return self._retry(None, delete_container, container,
                            response_dict=response_dict,
-                           query_string=query_string)
+                           query_string=query_string,
+                           headers=headers)
 
     def head_object(self, container, obj, headers=None):
         """Wrapper for :func:`head_object`"""
@@ -1808,11 +1836,12 @@ class Connection(object):
                            response_dict=response_dict)
 
     def delete_object(self, container, obj, query_string=None,
-                      response_dict=None):
+                      response_dict=None, headers=None):
         """Wrapper for :func:`delete_object`"""
         return self._retry(None, delete_object, container, obj,
                            query_string=query_string,
-                           response_dict=response_dict)
+                           response_dict=response_dict,
+                           headers=headers)
 
     def get_capabilities(self, url=None):
         url = url or self.url

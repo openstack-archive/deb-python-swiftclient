@@ -228,7 +228,7 @@ Capabilities
 Tempurl
 -------
 
-    ``tempurl [method] [seconds] [path] [key]``
+    ``tempurl [command-options] [method] [seconds] [path] [key]``
 
        Generates a temporary URL for a Swift object. ``method`` option sets an HTTP method to
        allow for this temporary URL that is usually 'GET' or 'PUT'. ``seconds`` option sets
@@ -236,7 +236,10 @@ Tempurl
        is passed, the Unix timestamp when the temporary URL will expire. ``path`` option sets
        the full path to the Swift object. Example: ``/v1/AUTH_account/c/o``. ``key`` option is
        the secret temporary URL key set on the Swift cluster. To set a key, run
-       ``swift post -m "Temp-URL-Key: <your secret key>"``.
+       ``swift post -m "Temp-URL-Key: <your secret key>"``. To generate a prefix-based temporary
+       URL use the ``--prefix-based`` option. This URL will contain the path to the prefix. Do not
+       forget to append the desired objectname at the end of the path portion (and before the
+       query portion) before sharing the URL.
 
 Auth
 ----
@@ -244,7 +247,7 @@ Auth
     ``auth``
 
        Display authentication variables in shell friendly format. Command to run to export storage
-       url and auth token into ``OS_STORAGE_URL`` and ``OS_AUTH_TOKEN``: ``swift auth``.
+       URL and auth token into ``OS_STORAGE_URL`` and ``OS_AUTH_TOKEN``: ``swift auth``.
        Command to append to a runcom file (e.g. ``~/.bashrc``, ``/etc/profile``) for automatic
        authentication: ``swift auth -v -U test:tester -K testing``.
 
@@ -294,6 +297,30 @@ List the contents of a container:
 
     testSwift.txt
 
+Copy an object to new destination:
+
+.. code-block:: bash
+
+    > swift copy -d /DestContainer/testSwift.txt SourceContainer testSwift.txt
+
+    SourceContainer/testSwift.txt copied to /DestContainer/testSwift.txt
+
+Delete an object from a container:
+
+.. code-block:: bash
+
+    > swift delete TestContainer testSwift.txt
+
+    testSwift.txt
+
+Delete a container:
+
+.. code-block:: bash
+
+    > swift delete TestContainer
+
+    TestContainer
+
 Display auth related authentication variables in shell friendly format:
 
 .. code-block:: bash
@@ -318,8 +345,10 @@ Download an object from a container:
 
      To upload an object to a container, your current working directory must be
      where the file is located or you must provide the complete path to the file.
-     In the case that you provide the complete path of the file, that complete
-     path will be the name of the uploaded object.
+     In other words, the --object-name <object-name> is an option that will upload
+     file and name object to <object-name> or upload directory and use <object-name> as
+     object prefix. In the case that you provide the complete path of the file,
+     that complete path will be the name of the uploaded object.
 
 For example:
 

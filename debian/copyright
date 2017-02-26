@@ -3,7 +3,7 @@ Upstream-Name: python-swiftclient
 Source: https://github.com/openstack/python-swiftclient.git
 
 Files: *
-Copyright: (c) 2010-2016, See AUTHORS file
+Copyright: (c) 2010-2017, See AUTHORS file
 License: Apache-2
 
 Files: debian/*
@@ -14,7 +14,7 @@ Copyright: (c) 2010-2016, Thomas Goirand <zigo@debian.org>
            (c) 2015, James Page <james.page@ubuntu.com>
            (c) 2015, Corey Bryant <corey.bryant@canonical.com>
            (c) 2015, Ivan Udovichenko <iudovichenko@mirantis.com>
-           (c) 2015-2016, Ondřej Nový <onovy@debian.org>
+           (c) 2015-2017, Ondřej Nový <onovy@debian.org>
 License: Apache-2
 
 License: Apache-2

@@ -29,11 +29,10 @@ from posixpath import join as urljoin
 from random import shuffle
 from time import time
 from threading import Thread
-from six import StringIO, text_type
+from six import Iterator, StringIO, string_types, text_type
 from six.moves.queue import Queue
 from six.moves.queue import Empty as QueueEmpty
 from six.moves.urllib.parse import quote
-from six import Iterator, string_types
 
 import json
 
@@ -44,7 +43,7 @@ from swiftclient.command_helpers import (
 )
 from swiftclient.utils import (
     config_true_value, ReadableToIterable, LengthWrapper, EMPTY_ETAG,
-    parse_api_response, report_traceback, n_groups
+    parse_api_response, report_traceback, n_groups, split_request_headers
 )
 from swiftclient.exceptions import ClientException
 from swiftclient.multithreading import MultiThreadingManager
@@ -274,20 +273,19 @@ def split_headers(options, prefix=''):
     """
     Splits 'Key: Value' strings and returns them as a dictionary.
 
-    :param options: An array of 'Key: Value' strings
+    :param options: Must be one of:
+        * an iterable of 'Key: Value' strings
+        * an iterable of ('Key', 'Value') pairs
+        * a dict of {'Key': 'Value'} pairs
     :param prefix: String to prepend to all of the keys in the dictionary.
         reporting.
     """
     headers = {}
-    for item in options:
-        split_item = item.split(':', 1)
-        if len(split_item) == 2:
-            headers[(prefix + split_item[0]).title()] = split_item[1].strip()
-        else:
-            raise SwiftError(
-                "Metadata parameter %s must contain a ':'.\n%s"
-                % (item, "Example: 'Color:Blue' or 'Size:Large'")
-            )
+    try:
+        headers = split_request_headers(options, prefix)
+    except ValueError as e:
+        raise SwiftError(e)
+
     return headers
 
 
@@ -467,7 +465,8 @@ class SwiftService(object):
                         performed by this call::
 
                             {
-                                'human': False
+                                'human': False,
+                                'header': []
                             }
 
         :returns: Either a single dictionary containing stats about an account
@@ -849,6 +848,7 @@ class SwiftService(object):
                                 'long': False,
                                 'prefix': None,
                                 'delimiter': None,
+                                'header': []
                             }
 
         :returns: A generator for returning the results of the list operation
@@ -884,10 +884,12 @@ class SwiftService(object):
     def _list_account_job(conn, options, result_queue):
         marker = ''
         error = None
+        req_headers = split_headers(options.get('header', []))
         try:
             while True:
                 _, items = conn.get_account(
-                    marker=marker, prefix=options['prefix']
+                    marker=marker, prefix=options['prefix'],
+                    headers=req_headers
                 )
 
                 if not items:
@@ -943,11 +945,12 @@ class SwiftService(object):
     def _list_container_job(conn, container, options, result_queue):
         marker = options.get('marker', '')
         error = None
+        req_headers = split_headers(options.get('header', []))
         try:
             while True:
                 _, items = conn.get_container(
                     container, marker=marker, prefix=options['prefix'],
-                    delimiter=options['delimiter']
+                    delimiter=options['delimiter'], headers=req_headers
                 )
 
                 if not items:
@@ -2112,6 +2115,7 @@ class SwiftService(object):
                                 'yes_all': False,
                                 'leave_segments': False,
                                 'prefix': None,
+                                'header': [],
                             }
 
         :returns: A generator for returning the results of the delete
@@ -2250,6 +2254,8 @@ class SwiftService(object):
 
     def _delete_object(self, conn, container, obj, options,
                        results_queue=None):
+        _headers = {}
+        _headers = split_headers(options.get('header', []))
         res = {
             'action': 'delete_object',
             'container': container,
@@ -2261,7 +2267,8 @@ class SwiftService(object):
 
             if not options['leave_segments']:
                 try:
-                    headers = conn.head_object(container, obj)
+                    headers = conn.head_object(container, obj,
+                                               headers=_headers)
                     old_manifest = headers.get('x-object-manifest')
                     if config_true_value(headers.get('x-static-large-object')):
                         query_string = 'multipart-manifest=delete'
@@ -2270,7 +2277,9 @@ class SwiftService(object):
                         raise
 
             results_dict = {}
-            conn.delete_object(container, obj, query_string=query_string,
+            conn.delete_object(container, obj,
+                               headers=_headers,
+                               query_string=query_string,
                                response_dict=results_dict)
 
             if old_manifest:
@@ -2322,10 +2331,13 @@ class SwiftService(object):
         return res
 
     @staticmethod
-    def _delete_empty_container(conn, container):
+    def _delete_empty_container(conn, container, options):
         results_dict = {}
+        _headers = {}
+        _headers = split_headers(options.get('header', []))
         try:
-            conn.delete_container(container, response_dict=results_dict)
+            conn.delete_container(container, headers=_headers,
+                                  response_dict=results_dict)
             res = {'success': True}
         except Exception as err:
             traceback, err_time = report_traceback()
@@ -2363,7 +2375,7 @@ class SwiftService(object):
                 return
 
             con_del = self.thread_manager.container_pool.submit(
-                self._delete_empty_container, container
+                self._delete_empty_container, container, options
             )
             con_del_res = get_future_result(con_del)
 

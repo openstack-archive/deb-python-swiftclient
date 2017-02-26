@@ -25,7 +25,7 @@ import socket
 from os import environ, walk, _exit as os_exit
 from os.path import isfile, isdir, join
 from six import text_type, PY2
-from six.moves.urllib.parse import unquote
+from six.moves.urllib.parse import unquote, urlparse
 from sys import argv as sys_argv, exit, stderr
 from time import gmtime, strftime
 
@@ -58,7 +58,8 @@ def immediate_exit(signum, frame):
 st_delete_options = '''[--all] [--leave-segments]
                     [--object-threads <threads>]
                     [--container-threads <threads>]
-                    [<container>] [<object>] [...]
+                    [--header <header:value>]
+                    [<container> [<object>] [...]]
 '''
 
 st_delete_help = '''
@@ -72,6 +73,9 @@ Positional arguments:
 Optional arguments:
   -a, --all             Delete all containers and objects.
   --leave-segments      Do not delete segments of manifest objects.
+  -H, --header <header:value>
+                        Adds a custom request header to use for deleting
+                        objects or an entire container .
   --object-threads <threads>
                         Number of threads to use for deleting objects.
                         Default is 10.
@@ -88,6 +92,11 @@ def st_delete(parser, args, output_manager):
     parser.add_argument(
         '-p', '--prefix', dest='prefix',
         help='Only delete items beginning with the <prefix>.')
+    parser.add_argument(
+        '-H', '--header', action='append', dest='header',
+        default=[],
+        help='Adds a custom request header to use for deleting objects '
+        'or an entire container.')
     parser.add_argument(
         '--leave-segments', action='store_true',
         dest='leave_segments', default=False,
@@ -209,18 +218,18 @@ st_download_options = '''[--all] [--marker <marker>] [--prefix <prefix>]
                       [--container-threads <threads>] [--no-download]
                       [--skip-identical] [--remove-prefix]
                       [--header <header:value>] [--no-shuffle]
-                      <container> <object>
+                      [<container> [<object>] [...]]
 '''
 
 st_download_help = '''
 Download objects from containers.
 
 Positional arguments:
-  <container>           Name of container to download from. To download a
-                        whole account, omit this and specify --all.
-  <object>              Name of object to download. Specify multiple times
-                        for multiple objects. Omit this to download all
-                        objects from the container.
+  [<container>]           Name of container to download from. To download a
+                          whole account, omit this and specify --all.
+  [<object>]              Name of object to download. Specify multiple times
+                          for multiple objects. Omit this to download all
+                          objects from the container.
 
 Optional arguments:
   -a, --all             Indicates that you really want to download
@@ -445,14 +454,15 @@ def st_download(parser, args, output_manager):
 
 
 st_list_options = '''[--long] [--lh] [--totals] [--prefix <prefix>]
-                  [--delimiter <delimiter>] [container]
+                  [--delimiter <delimiter>] [--header <header:value>]
+                  [<container>]
 '''
 
 st_list_help = '''
 Lists the containers for the account or the objects for a container.
 
 Positional arguments:
-  [container]           Name of container to list object in.
+  [<container>]           Name of container to list object in.
 
 Optional arguments:
   -l, --long            Long listing format, similar to ls -l.
@@ -465,6 +475,8 @@ Optional arguments:
                         Roll up items with the given delimiter. For containers
                         only. See OpenStack Swift API documentation for what
                         this means.
+  -H, --header <header:value>
+                        Adds a custom request header to use for listing.
 '''.strip('\n')
 
 
@@ -541,6 +553,10 @@ def st_list(parser, args, output_manager):
         help='Roll up items with the given delimiter. For containers '
              'only. See OpenStack Swift API documentation for '
              'what this means.')
+    parser.add_argument(
+        '-H', '--header', action='append', dest='header',
+        default=[],
+        help='Adds a custom request header to use for listing.')
     options, args = parse_args(parser, args)
     args = args[1:]
     if options['delimiter'] and not args:
@@ -580,20 +596,22 @@ def st_list(parser, args, output_manager):
             output_manager.error(e.value)
 
 
-st_stat_options = '''[--lh]
-                  [container] [object]
+st_stat_options = '''[--lh] [--header <header:value>]
+                  [<container> [<object>]]
 '''
 
 st_stat_help = '''
 Displays information for the account, container, or object.
 
 Positional arguments:
-  [container]           Name of container to stat from.
-  [object]              Name of object to stat.
+  [<container>]           Name of container to stat from.
+  [<object>]              Name of object to stat.
 
 Optional arguments:
   --lh                  Report sizes in human readable format similar to
                         ls -lh.
+  -H, --header <header:value>
+                        Adds a custom request header to use for stat.
 '''.strip('\n')
 
 
@@ -601,6 +619,11 @@ def st_stat(parser, args, output_manager):
     parser.add_argument(
         '--lh', dest='human', action='store_true', default=False,
         help='Report sizes in human readable format similar to ls -lh.')
+    parser.add_argument(
+        '-H', '--header', action='append', dest='header',
+        default=[],
+        help='Adds a custom request header to use for stat.')
+
     options, args = parse_args(parser, args)
     args = args[1:]
 
@@ -655,7 +678,7 @@ def st_stat(parser, args, output_manager):
 st_post_options = '''[--read-acl <acl>] [--write-acl <acl>] [--sync-to]
                   [--sync-key <sync-key>] [--meta <name:value>]
                   [--header <header>]
-                  [container] [object]
+                  [<container> [<object>]]
 '''
 
 st_post_help = '''
@@ -663,15 +686,17 @@ Updates meta information for the account, container, or object.
 If the container is not found, it will be created automatically.
 
 Positional arguments:
-  [container]           Name of container to post to.
-  [object]              Name of object to post.
+  [<container>]           Name of container to post to.
+  [<object>]              Name of object to post.
 
 Optional arguments:
   -r, --read-acl <acl>  Read ACL for containers. Quick summary of ACL syntax:
-                        .r:*, .r:-.example.com, .r:www.example.com, account1,
-                        account2:user2
+                        .r:*, .r:-.example.com, .r:www.example.com,
+                        account1 (v1.0 identity API only),
+                        account1:*, account2:user2 (v2.0+ identity API).
   -w, --write-acl <acl> Write ACL for containers. Quick summary of ACL syntax:
-                        account1 account2:user2
+                        account1 (v1.0 identity API only),
+                        account1:*, account2:user2 (v2.0+ identity API).
   -t, --sync-to <sync-to>
                         Sync To for containers, for multi-cluster replication.
   -k, --sync-key <sync-key>
@@ -752,7 +777,8 @@ def st_post(parser, args, output_manager):
 
 
 st_copy_options = '''[--destination </container/object>] [--fresh-metadata]
-                  [--meta <name:value>] [--header <header>] container object
+                  [--meta <name:value>] [--header <header>] <container>
+                  <object> [<object>] [...]
 '''
 
 st_copy_help = '''
@@ -760,14 +786,14 @@ Copies object to new destination, optionally updates objects metadata.
 If destination is not set, will update metadata of object
 
 Positional arguments:
-  container             Name of container to copy from.
-  object                Name of object to copy. Specify multiple times
-                        for multiple objects
+  <container>             Name of container to copy from.
+  <object>                Name of object to copy. Specify multiple times
+                          for multiple objects
 
 Optional arguments:
   -d, --destination </container[/object]>
                         The container and name of the destination object. Name
-                        of destination object can be ommited, then will be
+                        of destination object can be omitted, then will be
                         same as name of source object. Supplying multiple
                         objects and destination with object name is invalid.
   -M, --fresh-metadata  Copy the object without any existing metadata,
@@ -858,7 +884,8 @@ st_upload_options = '''[--changed] [--skip-identical] [--segment-size <size>]
                     <container> <file_or_directory> [<file_or_directory>] [...]
 '''
 
-st_upload_help = ''' Uploads specified files and directories to the given container.
+st_upload_help = '''
+Uploads specified files and directories to the given container.
 
 Positional arguments:
   <container>           Name of container to upload to.
@@ -1095,7 +1122,8 @@ def st_upload(parser, args, output_manager):
             output_manager.error(e.value)
 
 
-st_capabilities_options = "[--json] [<proxy_url>]"
+st_capabilities_options = '''[--json] [<proxy_url>]
+'''
 st_info_options = st_capabilities_options
 st_capabilities_help = '''
 Retrieve capability of the proxy.
@@ -1194,7 +1222,7 @@ def st_auth(parser, args, thread_manager):
         print('export OS_AUTH_TOKEN=%s' % sh_quote(token))
 
 
-st_tempurl_options = '''[--absolute]
+st_tempurl_options = '''[--absolute] [--prefix-based]
                      <method> <seconds> <path> <key>'''
 
 
@@ -1207,8 +1235,9 @@ Positional arguments:
   <seconds>             The amount of time in seconds the temporary URL will be
                         valid for; or, if --absolute is passed, the Unix
                         timestamp when the temporary URL will expire.
-  <path>                The full path to the Swift object. Example:
-                        /v1/AUTH_account/c/o.
+  <path>                The full path or storage URL to the Swift object.
+                        Example: /v1/AUTH_account/c/o
+                        or: http://saio:8080/v1/AUTH_account/c/o
   <key>                 The secret temporary URL key set on the Swift cluster.
                         To set a key, run \'swift post -m
                         "Temp-URL-Key:b3968d0207b54ece87cccc06515a89d4"\'
@@ -1217,6 +1246,7 @@ Optional arguments:
   --absolute            Interpret the <seconds> positional argument as a Unix
                         timestamp rather than a number of seconds in the
                         future.
+  --prefix-based	If present, a prefix-based tempURL will be generated.
 '''.strip('\n')
 
 
@@ -1226,8 +1256,14 @@ def st_tempurl(parser, args, thread_manager):
         dest='absolute_expiry', default=False,
         help=("If present, seconds argument will be interpreted as a Unix "
               "timestamp representing when the tempURL should expire, rather "
-              "than an offset from the current time")
+              "than an offset from the current time"),
     )
+    parser.add_argument(
+        '--prefix-based', action='store_true',
+        default=False,
+        help=("If present, a prefix-based tempURL will be generated."),
+    )
+
     (options, args) = parse_args(parser, args)
     args = args[1:]
     if len(args) < 4:
@@ -1235,17 +1271,25 @@ def st_tempurl(parser, args, thread_manager):
                              st_tempurl_options, st_tempurl_help)
         return
     method, seconds, path, key = args[:4]
-    try:
-        seconds = int(seconds)
-    except ValueError:
-        thread_manager.error('Seconds must be an integer')
-        return
+
+    parsed = urlparse(path)
+
     if method.upper() not in ['GET', 'PUT', 'HEAD', 'POST', 'DELETE']:
         thread_manager.print_msg('WARNING: Non default HTTP method %s for '
                                  'tempurl specified, possibly an error' %
                                  method.upper())
-    url = generate_temp_url(path, seconds, key, method,
-                            absolute=options['absolute_expiry'])
+    try:
+        path = generate_temp_url(parsed.path, seconds, key, method,
+                                 absolute=options['absolute_expiry'],
+                                 prefix=options['prefix_based'],)
+    except ValueError as err:
+        thread_manager.error(err)
+        return
+
+    if parsed.scheme and parsed.netloc:
+        url = "%s://%s%s" % (parsed.scheme, parsed.netloc, path)
+    else:
+        url = path
     thread_manager.print_msg(url)
 
 
@@ -1285,19 +1329,22 @@ class HelpFormatter(argparse.HelpFormatter):
 def parse_args(parser, args, enforce_requires=True):
     options, args = parser.parse_known_args(args or ['-h'])
     options = vars(options)
-    if enforce_requires and (options['debug'] or options['info']):
+    if enforce_requires and (options.get('debug') or options.get('info')):
         logging.getLogger("swiftclient")
-        if options['debug']:
+        if options.get('debug'):
             logging.basicConfig(level=logging.DEBUG)
             logging.getLogger('iso8601').setLevel(logging.WARNING)
             client_logger_settings['redact_sensitive_headers'] = False
-        elif options['info']:
+        elif options.get('info'):
             logging.basicConfig(level=logging.INFO)
 
-    if args and options['help']:
-        _help = globals().get('st_%s_help' % args[0],
-                              "no help for %s" % args[0])
-        print(_help)
+    if args and options.get('help'):
+        _help = globals().get('st_%s_help' % args[0])
+        _options = globals().get('st_%s_options' % args[0], "\n")
+        if _help:
+            print("Usage: %s %s %s\n%s" % (BASENAME, args[0], _options, _help))
+        else:
+            print("no such command: %s" % args[0])
         exit()
 
     # Short circuit for tempurl, which doesn't need auth
