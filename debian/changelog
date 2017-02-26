@@ -1,6 +1,9 @@
-python-swiftclient (1:3.1.0-4) UNRELEASED; urgency=medium
+python-swiftclient (1:3.3.0-1) UNRELEASED; urgency=medium
 
+  * New upstream release
   * d/control + d/gbp.conf: Change branch to debian/ocata
+  * Dropped d/p/Require_futures_only_for_Python_2.patch
+    (Applied upstream)
 
  -- Ondřej Nový <onovy@debian.org>  Sun, 26 Feb 2017 10:59:30 +0100
 

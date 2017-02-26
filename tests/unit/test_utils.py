@@ -32,10 +32,10 @@ class TestConfigTrueValue(unittest.TestCase):
     @mock.patch.object(u, 'TRUE_VALUES', 'hello world'.split())
     def test_config_true_value(self):
         for val in 'hello world HELLO WORLD'.split():
-            self.assertIs(u.config_true_value(val), True)
-        self.assertIs(u.config_true_value(True), True)
-        self.assertIs(u.config_true_value('foo'), False)
-        self.assertIs(u.config_true_value(False), False)
+            self.assertIs(True, u.config_true_value(val))
+        self.assertIs(True, u.config_true_value(True))
+        self.assertIs(False, u.config_true_value('foo'))
+        self.assertIs(False, u.config_true_value(False))
 
 
 class TestPrtBytes(unittest.TestCase):
@@ -150,6 +150,35 @@ class TestTempURL(unittest.TestCase):
         ])
         self.assertIsInstance(url, type(self.url))
 
+    @mock.patch('hmac.HMAC')
+    @mock.patch('time.time', return_value=1400000000)
+    def test_generate_temp_url_prefix(self, time_mock, hmac_mock):
+        hmac_mock().hexdigest.return_value = 'temp_url_signature'
+        prefixes = ['', 'o', 'p0/p1/']
+        for p in prefixes:
+            hmac_mock.reset_mock()
+            path = '/v1/AUTH_account/c/' + p
+            expected_url = path + ('?temp_url_sig=temp_url_signature'
+                                   '&temp_url_expires=1400003600'
+                                   '&temp_url_prefix=' + p)
+            expected_body = '\n'.join([
+                self.method,
+                '1400003600',
+                'prefix:' + path,
+            ]).encode('utf-8')
+            url = u.generate_temp_url(path, self.seconds,
+                                      self.key, self.method, prefix=True)
+            key = self.key
+            if not isinstance(key, six.binary_type):
+                key = key.encode('utf-8')
+            self.assertEqual(url, expected_url)
+            self.assertEqual(hmac_mock.mock_calls, [
+                mock.call(key, expected_body, sha1),
+                mock.call().hexdigest(),
+            ])
+
+            self.assertIsInstance(url, type(path))
+
     def test_generate_temp_url_invalid_path(self):
         with self.assertRaises(ValueError) as exc_manager:
             u.generate_temp_url(b'/v1/a/c/\xff', self.seconds, self.key,
@@ -170,15 +199,62 @@ class TestTempURL(unittest.TestCase):
         self.assertEqual(url, expected_url)
 
     def test_generate_temp_url_bad_seconds(self):
-        with self.assertRaises(TypeError) as exc_manager:
+        with self.assertRaises(ValueError) as exc_manager:
             u.generate_temp_url(self.url, 'not_an_int', self.key, self.method)
         self.assertEqual(exc_manager.exception.args[0],
-                         'seconds must be an integer')
+                         'seconds must be a whole number')
 
         with self.assertRaises(ValueError) as exc_manager:
             u.generate_temp_url(self.url, -1, self.key, self.method)
         self.assertEqual(exc_manager.exception.args[0],
-                         'seconds must be a positive integer')
+                         'seconds must be a whole number')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url(self.url, 1.1, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'seconds must be a whole number')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url(self.url, '-1', self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'seconds must be a whole number')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url(self.url, '1.1', self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'seconds must be a whole number')
+
+    def test_generate_temp_url_bad_path(self):
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('/v1/a/c', 60, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must be full path to an object e.g. /v1/a/c/o')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('v1/a/c/o', 60, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must be full path to an object e.g. /v1/a/c/o')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('blah/v1/a/c/o', 60, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must be full path to an object e.g. /v1/a/c/o')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('/v1//c/o', 60, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must be full path to an object e.g. /v1/a/c/o')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('/v1/a/c/', 60, self.key, self.method)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must be full path to an object e.g. /v1/a/c/o')
+
+        with self.assertRaises(ValueError) as exc_manager:
+            u.generate_temp_url('/v1/a/c', 60, self.key, self.method,
+                                prefix=True)
+        self.assertEqual(exc_manager.exception.args[0],
+                         'path must at least contain /v1/a/c/')
 
 
 class TestTempURLUnicodePathAndKey(TestTempURL):
@@ -265,11 +341,11 @@ class TestReadableToIterable(unittest.TestCase):
         # Check creation with a real and noop md5 class
         data = u.ReadableToIterable(None, None, md5=True)
         self.assertEqual(md5().hexdigest(), data.get_md5sum())
-        self.assertIs(type(data.md5sum), type(md5()))
+        self.assertIs(type(md5()), type(data.md5sum))
 
         data = u.ReadableToIterable(None, None, md5=False)
         self.assertEqual('', data.get_md5sum())
-        self.assertIs(type(data.md5sum), u.NoopMD5)
+        self.assertIs(u.NoopMD5, type(data.md5sum))
 
     def test_unicode(self):
         # Check no errors are raised if unicode data is feed in.
