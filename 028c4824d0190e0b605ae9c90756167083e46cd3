@@ -1,0 +1,9 @@
+Code-Review+2: Tim Burke <tim@swiftstack.com>
+Code-Review+2: Clay Gerrard <clay.gerrard@gmail.com>
+Workflow+1: Clay Gerrard <clay.gerrard@gmail.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Wed, 08 Mar 2017 04:01:15 +0000
+Reviewed-on: https://review.openstack.org/442342
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master
