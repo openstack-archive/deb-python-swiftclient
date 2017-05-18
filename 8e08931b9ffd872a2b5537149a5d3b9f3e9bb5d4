@@ -1,0 +1,9 @@
+Code-Review+2: Thiago da Silva <thiago@redhat.com>
+Code-Review+2: Christian Schwede <cschwede@redhat.com>
+Workflow+1: Christian Schwede <cschwede@redhat.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Thu, 18 May 2017 14:37:17 +0000
+Reviewed-on: https://review.openstack.org/423377
+Project: openstack/deb-python-swiftclient
+Branch: refs/heads/master
